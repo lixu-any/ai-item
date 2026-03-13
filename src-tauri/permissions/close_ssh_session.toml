@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-close-ssh-session"
+description = "Enables the close_ssh_session command"
+commands.allow = ["close_ssh_session"]

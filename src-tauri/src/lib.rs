@@ -8,12 +8,13 @@ fn greet(name: &str) -> String {
 
 mod db;
 mod ssh;
+mod pty;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(ssh::SessionPool::default())
-        .plugin(tauri_plugin_opener::init())
+        .manage(ssh::SessionPool(Default::default()))
+        .manage(pty::PtySessionPool(Default::default()))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             db::init_db(app.handle())?;
@@ -54,21 +55,24 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
-            db::add_host,
-            db::get_host,
-            db::update_host,
             db::get_hosts,
+            db::add_host,
+            db::update_host,
             db::delete_host,
+            db::get_groups,
             db::add_group,
-            db::get_group,
             db::update_group,
             db::delete_group,
-            db::get_groups,
             db::save_setting,
             db::get_setting,
             ssh::open_ssh_session,
             ssh::write_to_ssh,
-            ssh::resize_ssh_session
+            ssh::resize_ssh_session,
+            ssh::close_ssh_session,
+            pty::open_pty_session,
+            pty::write_to_pty,
+            pty::resize_pty_session,
+            pty::close_pty_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

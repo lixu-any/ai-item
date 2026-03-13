@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-open-pty-session"
+description = "Enables the open_pty_session command."
+commands.allow = ["open_pty_session"]

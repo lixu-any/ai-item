@@ -5,10 +5,15 @@ import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewW
 import { listen, emit } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import Terminal from "./components/Terminal.vue";
+import ContextMenu, { MenuItem } from "./components/ContextMenu.vue";
+import SpotlightSearch from "./components/SpotlightSearch.vue";
 
 interface SessionTab {
   id: string;
   title: string;
+  type: 'ssh' | 'local';
+  host?: Host;
+  connected?: boolean;
 }
 
 interface Group {
@@ -48,6 +53,8 @@ const collapsedUnGrouped = ref(false);
 const toasts = ref<{id: number, message: string, type: 'success' | 'error'}[]>([]);
 let toastIdCounter = 0;
 
+const showSpotlight = ref(false);
+
 const viewMode = ref<'main' | 'add-host' | 'edit-host' | 'add-group' | 'edit-group'>('main');
 const hostId = ref<number | null>(null);
 const groupId = ref<number | null>(null);
@@ -56,6 +63,13 @@ const deletingGroupId = ref<number | null>(null);
 // 窗口大小持久化相关
 const appWindow = getCurrentWebviewWindow();
 let resizeTimer: any = null;
+
+// 右键菜单相关
+const showTabMenu = ref(false);
+const menuX = ref(0);
+const menuY = ref(0);
+const contextTabId = ref<string | null>(null);
+const tabMenuItems = ref<MenuItem[]>([]);
 
 const newGroup = ref<Group>({
   name: '',
@@ -104,7 +118,7 @@ function isGroupCollapsed(groupId: number) {
 }
 
 function isHostActive(host: Host) {
-  return sessions.value.some(s => s.title.includes(`${host.username}@${host.host}`));
+  return sessions.value.some(s => s.type === 'ssh' && s.host?.id === host.id);
 }
 
 async function loadHosts() {
@@ -170,15 +184,19 @@ onMounted(async () => {
       loadGroups();
     });
     
-    listen('host-changed', () => {
-      console.log("收到 host-changed 事件，刷新列表");
-      loadHosts();
-      loadGroups();
-    });
-    
     appWindow.onResized(() => {
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(saveWindowSize, 500);
+    });
+
+    // 注册全局快捷键
+    window.addEventListener('keydown', (e) => {
+      // Cmd+K or Cmd+P (Mac) / Ctrl+K or Ctrl+P (Others)
+      const isMod = window.navigator.platform.includes('Mac') ? (e.metaKey || e.ctrlKey) : e.ctrlKey;
+      if (isMod && (e.key === 'k' || e.key === 'p')) {
+        e.preventDefault();
+        showSpotlight.value = !showSpotlight.value;
+      }
     });
   }
 });
@@ -386,16 +404,44 @@ async function confirmDelete() {
   }
 }
 
+async function newLocalTerminal() {
+  const sessionId = crypto.randomUUID();
+  const newSession: SessionTab = {
+    id: sessionId,
+    title: '本地终端',
+    type: 'local',
+    connected: true
+  };
+  
+  sessions.value.push(newSession);
+  activeSessionId.value = sessionId;
+  
+  try {
+    // 默认开启尺寸，稍后 Terminal.vue 会触发 resize 同步更准确的值
+    await invoke('open_pty_session', {
+      sessionId: sessionId, // PTY session is tied to sessionId
+      cols: 80,
+      rows: 24
+    });
+  } catch (err) {
+    showToast(`无法开启本地终端: ${err}`, 'error');
+    sessions.value = sessions.value.filter(s => s.id !== sessionId);
+  }
+}
+
 async function connectToHost(host: Host) {
   connecting.value = true;
   connError.value = "";
   
-  const id = crypto.randomUUID();
+  const sessionId = crypto.randomUUID();
   sessions.value.push({
-    id: id,
-    title: `${host.username}@${host.host}`
+    id: sessionId,
+    title: `${host.username}@${host.host}`,
+    type: 'ssh',
+    host: host,
+    connected: true
   });
-  activeSessionId.value = id;
+  activeSessionId.value = sessionId;
 
   await nextTick();
   await new Promise(r => setTimeout(r, 100));
@@ -403,23 +449,120 @@ async function connectToHost(host: Host) {
   try {
     console.log("正在调用 open_ssh_session...");
     await invoke("open_ssh_session", {
-      sessionId: id,
+      sessionId: sessionId, // Use sessionId consistently
       host: host.host,
       port: host.port,
       username: host.username,
       password: host.password || null,
       privateKey: host.private_key || null
     });
-    console.log("连接成功, sessionId:", id);
+    console.log("连接成功, sessionId:", sessionId);
     showToast(`成功连接到 ${host.name}`);
   } catch (err) {
     console.error("连接异常:", err);
     showToast(`连接失败: ${err}`, "error");
-    closeSession(id);
+    closeSession(sessionId);
   } finally {
     connecting.value = false;
   }
 }
+
+async function reconnectSession(session: SessionTab) {
+  // 先断开
+  await disconnectSession(session);
+  
+  // 重新连接：由于 connectToHost 会创建新 SessionID，这里我们需要一种原地重连的方式，
+  // 或者简单地把旧的删了加个新的。这里为了简单，我们采用“删除并新建”的逻辑。
+  closeSession(session.id);
+  if (session.type === 'ssh' && session.host) {
+    connectToHost(session.host);
+  } else {
+    newLocalTerminal();
+  }
+}
+
+async function disconnectSession(session: SessionTab) {
+  try {
+    if (session.type === 'ssh') {
+      await invoke('close_ssh_session', { sessionId: session.id });
+    } else {
+      await invoke('close_pty_session', { sessionId: session.id });
+    }
+    session.connected = false;
+    showToast(`已断开会话: ${session.title}`);
+  } catch (err) {
+    console.error("断开会话失败:", err);
+  }
+}
+
+// 右键菜单处理
+function onTabContextMenu(e: MouseEvent, session: SessionTab) {
+  menuX.value = e.clientX;
+  menuY.value = e.clientY;
+  contextTabId.value = session.id;
+  
+  const isConnected = session.connected !== false;
+  
+  tabMenuItems.value = [
+    { label: '复制标签', icon: '👯', action: 'duplicate' },
+    { divider: true },
+    { label: '连接', icon: '🔗', action: 'connect', disabled: isConnected },
+    { label: '重新连接', icon: '🔄', action: 'reconnect' },
+    { label: '断开连接', icon: '🔌', action: 'disconnect', disabled: !isConnected },
+    { divider: true },
+    { label: '关闭', icon: '❌', action: 'close' },
+    { label: '关闭其他', icon: '🧹', action: 'closeOthers' },
+    { label: '关闭全部', icon: '🗑️', action: 'closeAll', danger: true },
+  ];
+  
+  showTabMenu.value = true;
+}
+
+async function handleTabMenuAction(action: string) {
+  const targetId = contextTabId.value;
+  if (!targetId) return;
+  
+  const session = sessions.value.find(s => s.id === targetId);
+  if (!session) return;
+
+  switch (action) {
+    case 'duplicate':
+      if (session.type === 'ssh' && session.host) {
+        connectToHost(session.host);
+      } else {
+        newLocalTerminal();
+      }
+      break;
+    case 'connect':
+      if (session.type === 'ssh' && session.host) {
+        // 由于目前的 open_ssh_session 等逻辑都是异步且依赖新生成 ID 的，
+        // 原地重连比较复杂。为了 UX 的一致性，这里我们直接调用重连逻辑即“重开”。
+        reconnectSession(session);
+      } else {
+        reconnectSession(session);
+      }
+      break;
+    case 'reconnect':
+      reconnectSession(session);
+      break;
+    case 'disconnect':
+      disconnectSession(session);
+      break;
+    case 'close':
+      closeSession(targetId);
+      break;
+    case 'closeOthers':
+      sessions.value = sessions.value.filter(s => s.id === targetId);
+      activeSessionId.value = targetId;
+      break;
+    case 'closeAll':
+      sessions.value = [];
+      activeSessionId.value = null;
+      break;
+  }
+}
+
+// 移除 splitPane 函数
 
 function onDragStart(event: DragEvent, hostId: number) {
   if (event.dataTransfer) {
@@ -603,6 +746,10 @@ async function saveWindowSize() {
         </div>
       </div>
       <div class="sidebar-footer">
+        <div class="footer-item" @click="newLocalTerminal" title="本地终端">
+          <span class="footer-icon">💻</span>
+          <span>本地终端</span>
+        </div>
         <div class="footer-item" title="AI 助手">
           <span class="footer-icon">✨</span>
           <span>AI 助手</span>
@@ -620,11 +767,17 @@ async function saveWindowSize() {
           v-for="session in sessions" 
           :key="session.id" 
           class="tab"
-          :class="{ active: activeSessionId === session.id }"
+          :class="{ 
+            active: activeSessionId === session.id,
+            disconnected: session.connected === false
+          }"
           @click="activeSessionId = session.id"
+          @contextmenu.prevent="onTabContextMenu($event, session)"
         >
           <span>{{ session.title }}</span>
-          <button class="close-btn" @click.stop="closeSession(session.id)">×</button>
+          <div class="tab-actions">
+            <span class="close-icon" @click.stop="closeSession(session.id)">×</span>
+          </div>
         </div>
       </header>
       <div class="terminal-wrapper">
@@ -638,16 +791,20 @@ async function saveWindowSize() {
             <p>基于人工智能的高效 SSH 终端</p>
             <div class="hero-actions">
               <button @click="openAddModal">新增服务器</button>
+              <button class="secondary-btn" @click="newLocalTerminal">本地终端</button>
             </div>
           </div>
         </div>
-        <Terminal 
-          v-for="session in sessions" 
-          :key="session.id"
-          v-show="activeSessionId === session.id"
-          :session-id="session.id" 
-          :is-active="activeSessionId === session.id"
-        />
+        <div class="main-terminal-area">
+          <Terminal 
+            v-for="session in sessions" 
+            :key="session.id"
+            v-show="activeSessionId === session.id"
+            :session-id="session.id" 
+            :is-active="activeSessionId === session.id"
+            :type="session.type"
+          />
+        </div>
       </div>
     </main>
   </div>
@@ -793,11 +950,26 @@ async function saveWindowSize() {
   </div>
 
   <!-- Toast Container -->
+  <SpotlightSearch 
+    v-model:visible="showSpotlight" 
+    :hosts="savedHosts" 
+    @select="connectToHost"
+  />
+
   <div class="toast-container">
     <div v-for="t in toasts" :key="t.id" class="toast" :class="t.type">
       {{ t.message }}
     </div>
   </div>
+
+  <!-- Tab Context Menu -->
+  <ContextMenu 
+    v-model:visible="showTabMenu"
+    :x="menuX"
+    :y="menuY"
+    :items="tabMenuItems"
+    @action="handleTabMenuAction"
+  />
 </template>
 
 <style>
@@ -921,7 +1093,7 @@ body, html, #app {
 }
 .add-btn.primary:hover {
   background: var(--accent-hover);
-  box-shadow: 0 4px 12px rgba(57, 108, 216, 0.3);
+  box-shadow: 0 4px 12px rgba(57, 108, 216, 0.4);
 } 
 
 .host-list {
@@ -1048,15 +1220,60 @@ body, html, #app {
   color: var(--text-main);
 }
 .footer-icon { font-size: 1rem; opacity: 0.8; }
-
-.modal-content.confirm-modal {
-  border-color: var(--border-color);
-  width: 400px;
+.action-icon {
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid currentColor;
+  opacity: 0.6;
+  position: relative;
+  transition: all 0.2s;
+  cursor: pointer;
+  display: inline-block;
 }
-.confirm-modal p {
-  color: var(--text-dim);
-  line-height: 1.6;
-  font-size: 0.9rem;
+.action-icon:hover { opacity: 1; color: var(--accent-color); border-color: var(--accent-color); }
+
+/* Custom Split Icons */
+.split-icon-v::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 50%; bottom: 0;
+  width: 1.5px; background: currentColor;
+  transform: translateX(-50%);
+}
+.split-icon-h::after {
+  content: '';
+  position: absolute;
+  left: 0; top: 50%; right: 0;
+  height: 1.5px; background: currentColor;
+  transform: translateY(-50%);
+}
+
+.session-container {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  gap: 2px;
+  background-color: #1a1a1a;
+}
+
+.layout-horizontal {
+  flex-direction: column;
+}
+
+.layout-vertical {
+  flex-direction: row;
+}
+
+.session-container > * {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.terminal-pane-active {
+  outline: 2px solid #396cd8;
+  z-index: 1;
 }
 
 /* Empty State */
@@ -1103,6 +1320,8 @@ body, html, #app {
   position: relative;
 }
 .tab:hover { background: var(--sidebar-hover); color: var(--text-main); }
+.tab.disconnected { opacity: 0.6; }
+.tab.disconnected span { text-decoration: line-through; opacity: 0.8; }
 .tab.active {
   background: var(--bg-dark);
   color: var(--text-main);
@@ -1117,11 +1336,43 @@ body, html, #app {
   border-radius: 6px 6px 0 0;
 }
 
-.close-btn { 
+.tab-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+}
+
+.action-icon {
+  width: 16px;
+  height: 16px;
+  border: 1px solid currentColor;
+  opacity: 0.6;
+  position: relative;
+  transition: all 0.2s;
+  cursor: pointer;
+}
+.action-icon:hover { opacity: 1; color: var(--accent-color); border-color: var(--accent-color); }
+
+/* Custom Split Icons */
+.split-icon-v::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 50%; bottom: 0;
+  width: 1px; background: currentColor;
+}
+.split-icon-h::after {
+  content: '';
+  position: absolute;
+  left: 0; top: 50%; right: 0;
+  height: 1px; background: currentColor;
+}
+
+.close-icon { 
   font-size: 14px; opacity: 0.5; transition: 0.2s;
   background: none; border: none; color: inherit; cursor: pointer;
 }
-.close-btn:hover { opacity: 1; transform: scale(1.1); }
+.close-icon:hover { opacity: 1; transform: scale(1.1); }
 
 .terminal-wrapper { 
   flex: 1; 
@@ -1129,6 +1380,41 @@ body, html, #app {
   background: #000; 
   overflow: hidden; 
   display: flex;
+}
+
+.main-terminal-area {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  height: 100%;
+}
+
+.session-container {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  gap: 0;
+  background-color: #1a1a1a;
+}
+
+.layout-horizontal {
+  flex-direction: column;
+}
+
+.layout-vertical {
+  flex-direction: row;
+}
+
+.session-container > * {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.terminal-pane-active {
+  outline: 2px solid #396cd8;
+  z-index: 1;
 }
 
 .terminal-wrapper > div:not(.terminal-overlay):not(.terminal-empty) {
@@ -1162,13 +1448,23 @@ body, html, #app {
   background-clip: text;
   -webkit-text-fill-color: transparent; 
 }
-.empty-hero p { color: var(--text-dim); font-size: 1.1rem; margin-bottom: 32px; }
+.hero-actions {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+}
 .hero-actions button {
   background: var(--accent-color); color: white; border: none;
   padding: 12px 32px; border-radius: 12px; font-weight: 600;
   cursor: pointer; transition: 0.2s;
 }
+.hero-actions .secondary-btn {
+  background: rgba(57, 108, 216, 0.1);
+  color: var(--accent-color);
+  border: 1px solid var(--accent-color);
+}
 .hero-actions button:hover { background: var(--accent-hover); transform: translateY(-2px); box-shadow: 0 8px 20px rgba(57, 108, 216, 0.4); }
+.hero-actions .secondary-btn:hover { background: rgba(57, 108, 216, 0.15); color: var(--accent-hover); }
 
 /* Modal Styling */
 .modal-overlay {

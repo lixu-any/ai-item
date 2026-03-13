@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-resize-pty-session"
+description = "Enables the resize_pty_session command."
+commands.allow = ["resize_pty_session"]

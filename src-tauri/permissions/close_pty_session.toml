@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-close-pty-session"
+description = "Enables the close_pty_session command"
+commands.allow = ["close_pty_session"]

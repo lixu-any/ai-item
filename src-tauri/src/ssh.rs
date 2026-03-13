@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter, State};
 pub enum SshControlMsg {
     Data(Vec<u8>),
     Resize { cols: u32, rows: u32 },
+    Close,
 }
 
 pub struct SshSession {
@@ -203,6 +204,11 @@ pub async fn open_ssh_session(
                             }
                         }
                     }
+                    SshControlMsg::Close => {
+                        println!("Worker: 收到 Close 请求，正在结束会话...");
+                        let _ = channel.close();
+                        break;
+                    }
                 }
             }
 
@@ -261,4 +267,16 @@ pub async fn resize_ssh_session(
     } else {
         Err("Session not found".to_string())
     }
+}
+
+#[tauri::command]
+pub async fn close_ssh_session(
+    state: State<'_, SessionPool>,
+    session_id: String,
+) -> Result<(), String> {
+    let mut pool = state.0.lock().unwrap();
+    if let Some(sess) = pool.remove(&session_id) {
+        let _ = sess.tx.send(SshControlMsg::Close);
+    }
+    Ok(())
 }
