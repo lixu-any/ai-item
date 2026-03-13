@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "AI-Term-Shell",
         "width": 1000,
-        "height": 700
+        "height": 700,
+        "visible": false
       }
     ],
     "security": {

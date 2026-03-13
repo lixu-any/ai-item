@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-save-setting"
+description = "Enables the save_setting command."
+commands.allow = ["save_setting"]
+
+[[permission]]
+identifier = "deny-save-setting"
+description = "Denies the save_setting command."
+commands.deny = ["save_setting"]

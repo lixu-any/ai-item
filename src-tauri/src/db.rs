@@ -93,6 +93,15 @@ pub fn init_db(app_handle: &AppHandle) -> Result<(), String> {
         )",
         [],
     ).map_err(|e| e.to_string())?;
+    
+    // 创建设置表 (针对窗口大小、主题等全局配置)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+        [],
+    ).map_err(|e| e.to_string())?;
 
     println!("数据库初始化成功: {:?}", app_dir.join(DB_NAME));
     Ok(())
@@ -272,4 +281,29 @@ pub async fn delete_group(app_handle: AppHandle, id: i32) -> Result<(), String> 
     conn.execute("DELETE FROM groups WHERE id = ?1", [id])
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn save_setting(app_handle: AppHandle, key: String, value: String) -> Result<(), String> {
+    println!("Backend: Saving setting {} = {}", key, value);
+    let conn = get_conn(&app_handle)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        (&key, &value),
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_setting(app_handle: AppHandle, key: String) -> Result<Option<String>, String> {
+    get_setting_internal(&app_handle, &key)
+}
+
+pub fn get_setting_internal(app_handle: &AppHandle, key: &str) -> Result<Option<String>, String> {
+    let conn = get_conn(app_handle)?;
+    let mut stmt = conn
+        .prepare("SELECT value FROM settings WHERE key = ?1")
+        .map_err(|e| e.to_string())?;
+    let value = stmt.query_row([key], |row| row.get(0)).ok();
+    Ok(value)
 }

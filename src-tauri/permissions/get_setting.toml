@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-get-setting"
+description = "Enables the get_setting command."
+commands.allow = ["get_setting"]
+
+[[permission]]
+identifier = "deny-get-setting"
+description = "Denies the get_setting command."
+commands.deny = ["get_setting"]

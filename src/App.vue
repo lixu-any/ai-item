@@ -3,6 +3,7 @@ import { ref, nextTick, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { listen, emit } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import Terminal from "./components/Terminal.vue";
 
 interface SessionTab {
@@ -42,6 +43,8 @@ const deletingHostId = ref<number | null>(null);
 const authType = ref<'password' | 'private_key'>('password');
 const pkType = ref<'path' | 'content'>('path');
 const searchQuery = ref("");
+const collapsedGroups = ref<number[]>([]);
+const collapsedUnGrouped = ref(false);
 const toasts = ref<{id: number, message: string, type: 'success' | 'error'}[]>([]);
 let toastIdCounter = 0;
 
@@ -49,6 +52,10 @@ const viewMode = ref<'main' | 'add-host' | 'edit-host' | 'add-group' | 'edit-gro
 const hostId = ref<number | null>(null);
 const groupId = ref<number | null>(null);
 const deletingGroupId = ref<number | null>(null);
+
+// 窗口大小持久化相关
+const appWindow = getCurrentWebviewWindow();
+let resizeTimer: any = null;
 
 const newGroup = ref<Group>({
   name: '',
@@ -82,6 +89,19 @@ const filteredHosts = () => {
     h.username.toLowerCase().includes(q)
   );
 };
+
+function toggleGroup(groupId: number) {
+  const index = collapsedGroups.value.indexOf(groupId);
+  if (index > -1) {
+    collapsedGroups.value.splice(index, 1);
+  } else {
+    collapsedGroups.value.push(groupId);
+  }
+}
+
+function isGroupCollapsed(groupId: number) {
+  return collapsedGroups.value.includes(groupId);
+}
 
 function isHostActive(host: Host) {
   return sessions.value.some(s => s.title.includes(`${host.username}@${host.host}`));
@@ -143,10 +163,22 @@ onMounted(async () => {
   } else {
     viewMode.value = 'main';
     loadHosts();
+    loadGroups();
     listen('host-changed', () => {
       console.log("收到 host-changed 事件，刷新列表");
       loadHosts();
       loadGroups();
+    });
+    
+    listen('host-changed', () => {
+      console.log("收到 host-changed 事件，刷新列表");
+      loadHosts();
+      loadGroups();
+    });
+    
+    appWindow.onResized(() => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(saveWindowSize, 500);
     });
   }
 });
@@ -430,6 +462,32 @@ async function cancelForm() {
     showAddModal.value = false;
   }
 }
+
+async function selectPrivateKeyFile() {
+  try {
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      title: '选择私钥文件',
+    });
+    if (selected) {
+      newHost.value.private_key = selected as string;
+    }
+  } catch (err) {
+    showToast("选择文件失败: " + err, "error");
+  }
+}
+
+async function saveWindowSize() {
+  try {
+    const size = await appWindow.innerSize();
+    await invoke("save_setting", { key: "window_width", value: size.width.toString() });
+    await invoke("save_setting", { key: "window_height", value: size.height.toString() });
+  } catch (err) {
+    console.error("Failed to save window size:", err);
+  }
+}
+
 </script>
 
 <template>
@@ -458,11 +516,15 @@ async function cancelForm() {
 
       <div class="host-list">
         <!-- 渲染分组及其主机 -->
-        <div v-for="g in groups" :key="g.id!" class="group-section"
+        <div v-for="g in groups" :key="g.id!" 
+          v-show="!searchQuery || filteredHosts().some(h => h.group_id === g.id)"
+          class="group-section"
+          :class="{ collapsed: isGroupCollapsed(g.id!) }"
           @dragover.prevent
           @drop="onDrop($event, g.id!)"
         >
-          <div class="group-header">
+          <div class="group-header" @click="toggleGroup(g.id!)">
+            <span class="chevron">›</span>
             <span class="folder-icon">📂</span>
             <span class="group-name">{{ g.name }}</span>
             <div class="group-actions">
@@ -470,7 +532,7 @@ async function cancelForm() {
               <button class="icon-btn delete-btn" @click.stop="deleteGroup(g.id!)" title="删除分组">✗</button>
             </div>
           </div>
-          <div class="group-content">
+          <div class="group-content" v-show="!isGroupCollapsed(g.id!) || searchQuery">
             <div 
               v-for="h in filteredHosts().filter((h: Host) => h.group_id === g.id)" 
               :key="h.id!" 
@@ -497,14 +559,16 @@ async function cancelForm() {
 
         <!-- 未分组主机 -->
         <div v-if="filteredHosts().some(h => !h.group_id)" class="group-section"
+          :class="{ collapsed: collapsedUnGrouped }"
           @dragover.prevent
           @drop="onDrop($event, null)"
         >
-          <div class="group-header">
+          <div class="group-header" @click="collapsedUnGrouped = !collapsedUnGrouped">
+            <span class="chevron">›</span>
             <span class="folder-icon">📂</span>
             <span class="group-name">未分组</span>
           </div>
-          <div class="group-content">
+          <div class="group-content" v-show="!collapsedUnGrouped || searchQuery">
             <div 
               v-for="h in filteredHosts().filter((h: Host) => !h.group_id)" 
               :key="h.id!" 
@@ -657,7 +721,10 @@ async function cancelForm() {
                 <span :class="{ active: pkType === 'content' }" @click="pkType = 'content'">直接粘贴</span>
               </div>
             </div>
-            <input v-if="pkType === 'path'" v-model="newHost.private_key" placeholder="~/.ssh/id_rsa" />
+            <div v-if="pkType === 'path'" class="input-with-btn">
+              <input v-model="newHost.private_key" placeholder="~/.ssh/id_rsa" />
+              <button class="browse-btn" @click="selectPrivateKeyFile">浏览</button>
+            </div>
             <textarea v-else v-model="newHost.private_key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..." rows="4" style="font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;"></textarea>
           </div>
         </div>
@@ -863,47 +930,75 @@ body, html, #app {
   padding: 0 4px;
 }
 
-.group-section { margin-bottom: 2px; }
+.group-section { margin-bottom: 4px; }
 .group-header {
   display: flex;
   align-items: center;
-  padding: 6px 12px;
-  border-radius: 6px;
-  color: var(--text-dim);
-  font-size: 0.75rem;
-  font-weight: 600;
+  gap: 6px;
+  padding: 4px 10px;
   cursor: pointer;
-  transition: all 0.2s;
+  border-radius: 8px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.group-header:hover { background: var(--glass-bg); color: var(--text-main); }
+.group-header:hover { background: var(--sidebar-hover); }
+
+.chevron {
+  font-size: 0.9rem;
+  color: var(--text-dim);
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  width: 12px;
+  display: flex;
+  justify-content: center;
+  transform: rotate(90deg);
+}
+.collapsed .chevron { transform: rotate(0deg); }
+
+.folder-icon { 
+  font-size: 0.9rem; 
+  opacity: 0.8; 
+  color: var(--accent-color);
+}
 .group-actions {
   margin-left: auto;
   display: flex;
-  gap: 8px;
+  gap: 6px;
   opacity: 0;
+  transition: opacity 0.2s;
 }
 .group-header:hover .group-actions { opacity: 1; }
-.group-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.folder-icon { margin-right: 8px; font-size: 0.9rem; opacity: 0.7; }
+.group-name { 
+  flex: 1; 
+  overflow: hidden; 
+  text-overflow: ellipsis; 
+  white-space: nowrap; 
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text-main);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  opacity: 0.9;
+}
 
 .group-content {
-  margin-left: 18px;
-  padding-left: 10px;
-  border-left: 1px solid var(--border-color);
+  margin-left: 20px;
+  padding-left: 12px;
+  border-left: 1px solid rgba(0,0,0,0.06);
   display: flex;
   flex-direction: column;
+  gap: 0;
+  margin-top: 2px;
 }
 
 .host-item {
-  padding: 4px 10px;
-  border-radius: 6px;
+  padding: 2px 10px;
+  border-radius: 8px;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  transition: all 0.15s ease;
+  transition: all 0.2s ease;
   cursor: pointer;
 }
-.host-item:hover { background: var(--sidebar-hover); }
+.host-item:hover { background: var(--sidebar-hover); transform: translateX(2px); }
 
 .host-info { display: flex; flex-direction: column; overflow: hidden; }
 .host-name-row { display: flex; align-items: center; gap: 6px; }
@@ -916,7 +1011,8 @@ body, html, #app {
 @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
 .host-name { font-size: 0.85rem; font-weight: 500; color: #1a1a1a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .host-item:hover .host-name { color: var(--accent-color); }
-.host-ip { font-size: 0.7rem; color: #4a4a4a; opacity: 1; font-family: 'JetBrains Mono', monospace; }
+.host-ip { font-size: 0.65rem; color: var(--text-dim); opacity: 0.6; font-family: 'JetBrains Mono', monospace; margin-top: 1px; }
+.host-item:hover .host-ip { opacity: 0.9; }
 
 .host-actions { display: flex; gap: 8px; opacity: 0; }
 .host-item:hover .host-actions { opacity: 1; }
@@ -1058,7 +1154,9 @@ body, html, #app {
 }
 .empty-hero { text-align: center; }
 .empty-hero h1 { 
-  font-size: 2.5rem; margin-bottom: 8px; font-weight: 800; 
+  font-size: 3rem; margin-bottom: 8px; font-weight: 800; 
+  line-height: 1.3;
+  padding: 10px 0;
   background: linear-gradient(135deg, var(--text-main) 0%, var(--accent-color) 100%); 
   -webkit-background-clip: text; 
   background-clip: text;
@@ -1245,6 +1343,29 @@ body, html, #app {
   color: var(--text-main);
 }
 .modal-content textarea { height: auto; padding: 10px 12px; line-height: 1.4; resize: vertical; }
+.input-with-btn {
+  display: flex;
+  gap: 8px;
+}
+.input-with-btn input {
+  flex: 1;
+}
+.browse-btn {
+  background: white;
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+.browse-btn:hover {
+  background: var(--bg-dark);
+  border-color: var(--accent-color);
+}
+
 .pk-toggle { font-size: 0.65rem; display: flex; gap: 8px; color: var(--text-dim); }
 .pk-toggle span { cursor: pointer; padding: 2px 6px; border-radius: 4px; opacity: 0.5; }
 .pk-toggle span.active { background: var(--border-color); opacity: 1; color: var(--text-main); font-weight: 600; }
