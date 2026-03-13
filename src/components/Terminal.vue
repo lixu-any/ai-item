@@ -71,7 +71,19 @@ onMounted(async () => {
     }
   });
 
-  term.onResize((size) => {
+  term.onResize(async (size) => {
+    if (props.sessionId) {
+      try {
+        await invoke('resize_ssh_session', {
+          sessionId: props.sessionId,
+          cols: size.cols,
+          rows: size.rows
+        });
+        console.log(`已将 PTY 尺寸同步到后端: ${size.cols}x${size.rows}`);
+      } catch (err) {
+        console.error('同步 PTY 尺寸失败:', err);
+      }
+    }
     emit('resize', size);
   });
 

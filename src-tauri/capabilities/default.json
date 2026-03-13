@@ -9,11 +9,13 @@
     "core:event:default",
     "allow-greet",
     "allow-add-host",
+    "allow-update-host",
     "allow-get-hosts",
     "allow-delete-host",
     "allow-add-group",
     "allow-get-groups",
     "allow-open-ssh-session",
-    "allow-write-to-ssh"
+    "allow-write-to-ssh",
+    "allow-resize-ssh-session"
   ]
 }

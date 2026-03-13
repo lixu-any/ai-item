@@ -7,8 +7,13 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
+pub enum SshControlMsg {
+    Data(Vec<u8>),
+    Resize { cols: u32, rows: u32 },
+}
+
 pub struct SshSession {
-    pub tx: mpsc::Sender<Vec<u8>>,
+    pub tx: mpsc::Sender<SshControlMsg>,
 }
 
 #[derive(Default)]
@@ -111,7 +116,7 @@ pub async fn open_ssh_session(
         }
     }
 
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let (tx, rx) = mpsc::channel::<SshControlMsg>();
     
     let session_id_clone = session_id.clone();
     let app_handle_clone = app_handle.clone();
@@ -148,28 +153,49 @@ pub async fn open_ssh_session(
                 }
             }
 
-            // Write to SSH
-            while let Ok(data) = rx.try_recv() {
+            // Process Control Messages (Write to SSH or Resize)
+            while let Ok(msg) = rx.try_recv() {
                 active = true;
-                let mut written = 0;
-                println!("Worker: 取出待发送数据，长度 {}", data.len());
-                while written < data.len() {
-                    match channel.write(&data[written..]) {
-                        Ok(n) => {
-                            written += n;
-                            println!("Worker: 成功向 SSH channel 写入 {} 字节", n);
+                match msg {
+                    SshControlMsg::Data(data) => {
+                        let mut written = 0;
+                        while written < data.len() {
+                            match channel.write(&data[written..]) {
+                                Ok(n) => {
+                                    written += n;
+                                }
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    thread::sleep(Duration::from_millis(10));
+                                    continue;
+                                }
+                                Err(e) => {
+                                    println!("Worker: 向 SSH channel 写入失败: {:?}", e);
+                                    break;
+                                }
+                            }
                         }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(10));
-                            continue;
-                        }
-                        Err(e) => {
-                            println!("Worker: 向 SSH channel 写入失败: {:?}", e);
-                            break;
+                        let _ = channel.flush();
+                    }
+                    SshControlMsg::Resize { cols, rows } => {
+                        println!("Worker: 收到 Resize 请求, cols: {}, rows: {}", cols, rows);
+                        loop {
+                            match channel.request_pty_size(cols, rows, None, None) {
+                                Ok(_) => {
+                                    println!("Worker: PTY Size 同步成功");
+                                    break;
+                                }
+                                Err(e) if e.code() == ErrorCode::Session(EAGAIN) => {
+                                    thread::sleep(Duration::from_millis(50));
+                                    continue;
+                                }
+                                Err(e) => {
+                                    println!("Worker: PTY Size 同步失败: {}", e);
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
-                let _ = channel.flush();
             }
 
             if !active {
@@ -197,7 +223,7 @@ pub async fn write_to_ssh(
     println!("收到前端输入请求，SessionID: {}, 数据长度: {}", session_id, data.len());
     let pool = state.0.lock().unwrap();
     if let Some(sess) = pool.get(&session_id) {
-        match sess.tx.send(data) {
+        match sess.tx.send(SshControlMsg::Data(data)) {
             Ok(_) => {
                 println!("成功将数据送入 channel");
                 Ok(())
@@ -209,6 +235,22 @@ pub async fn write_to_ssh(
         }
     } else {
         println!("找不到 SessionID: {}", session_id);
+        Err("Session not found".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn resize_ssh_session(
+    state: State<'_, SessionPool>,
+    session_id: String,
+    cols: u32,
+    rows: u32,
+) -> Result<(), String> {
+    let pool = state.0.lock().unwrap();
+    if let Some(sess) = pool.get(&session_id) {
+        sess.tx.send(SshControlMsg::Resize { cols, rows }).map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
         Err("Session not found".to_string())
     }
 }

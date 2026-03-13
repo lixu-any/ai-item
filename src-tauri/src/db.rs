@@ -76,6 +76,10 @@ pub fn init_db(app_handle: &AppHandle) -> Result<(), String> {
         [],
     ).map_err(|e| e.to_string())?;
 
+    // 尝试升级数据库，为已存在的 hosts 表添加 private_key 和 auth_token_id 字段
+    let _ = conn.execute("ALTER TABLE hosts ADD COLUMN private_key TEXT", []);
+    let _ = conn.execute("ALTER TABLE hosts ADD COLUMN auth_token_id TEXT", []);
+
     // 创建历史记录表
     conn.execute(
         "CREATE TABLE IF NOT EXISTS history_logs (
@@ -138,6 +142,29 @@ pub async fn get_hosts(app_handle: AppHandle) -> Result<Vec<Host>, String> {
         hosts.push(host.map_err(|e| e.to_string())?);
     }
     Ok(hosts)
+}
+
+#[tauri::command]
+pub async fn update_host(app_handle: AppHandle, host: Host) -> Result<(), String> {
+    let conn = get_conn(&app_handle)?;
+    if let Some(id) = host.id {
+        conn.execute(
+            "UPDATE hosts SET name=?1, group_id=?2, host=?3, port=?4, username=?5, password=?6, private_key=?7 WHERE id=?8",
+            (
+                &host.name,
+                &host.group_id,
+                &host.host,
+                &host.port,
+                &host.username,
+                &host.password,
+                &host.private_key,
+                id,
+            ),
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        Err("Host ID missing".to_string())
+    }
 }
 
 #[tauri::command]
