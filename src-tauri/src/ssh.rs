@@ -53,7 +53,15 @@ pub async fn open_ssh_session(
     }
 
     // Authenticate
-    if let Some(pkey) = private_key {
+    if let Some(pkey_raw) = private_key {
+        let pkey = if pkey_raw.trim().starts_with("-----BEGIN") {
+            pkey_raw
+        } else {
+            // 视为路径，处理 ~ 符号
+            let path_str = pkey_raw.replace("~", &std::env::var("HOME").unwrap_or_default());
+            std::fs::read_to_string(path_str).map_err(|e| format!("读取私钥文件失败: {}", e))?
+        };
+
         // 使用私钥认证
         loop {
             match sess.userauth_pubkey_memory(&username, None, &pkey, password.as_deref()) {

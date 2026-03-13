@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, nextTick, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { listen, emit } from "@tauri-apps/api/event";
 import Terminal from "./components/Terminal.vue";
 
 interface SessionTab {
@@ -35,13 +37,23 @@ const groups = ref<Group[]>([]);
 const showAddModal = ref(false);
 const isEditing = ref(false);
 const showGroupModal = ref(false);
-const newGroupName = ref("");
 const saveError = ref("");
 const deletingHostId = ref<number | null>(null);
 const authType = ref<'password' | 'private_key'>('password');
+const pkType = ref<'path' | 'content'>('path');
 const searchQuery = ref("");
 const toasts = ref<{id: number, message: string, type: 'success' | 'error'}[]>([]);
 let toastIdCounter = 0;
+
+const viewMode = ref<'main' | 'add-host' | 'edit-host' | 'add-group' | 'edit-group'>('main');
+const hostId = ref<number | null>(null);
+const groupId = ref<number | null>(null);
+const deletingGroupId = ref<number | null>(null);
+
+const newGroup = ref<Group>({
+  name: '',
+  parent_id: null,
+});
 
 function showToast(message: string, type: 'success' | 'error' = 'success') {
   const id = ++toastIdCounter;
@@ -91,9 +103,52 @@ async function loadGroups() {
   }
 }
 
-onMounted(() => {
-  loadHosts();
+onMounted(async () => {
+  const params = new URLSearchParams(window.location.search);
+  const view = params.get('view');
+  
+  // 无论什么模式，都需要加载业务分组以便选择
   loadGroups();
+
+  if (view === 'add-host') {
+    viewMode.value = 'add-host';
+    openAddModal();
+  } else if (view === 'edit-host') {
+    const id = params.get('id');
+    if (id) {
+      viewMode.value = 'edit-host';
+      hostId.value = parseInt(id);
+      try {
+        const h = await invoke<Host>("get_host", { id: hostId.value });
+        editHost(h);
+      } catch (err) {
+        showToast("加载主机信息失败: " + err, "error");
+      }
+    }
+  } else if (view === 'add-group') {
+    viewMode.value = 'add-group';
+    openAddGroupModal();
+  } else if (view === 'edit-group') {
+    const id = params.get('id');
+    if (id) {
+      viewMode.value = 'edit-group';
+      groupId.value = parseInt(id);
+      try {
+        const g = await invoke<Group>("get_group", { id: groupId.value });
+        editGroup(g);
+      } catch (err) {
+        showToast("加载分组信息失败: " + err, "error");
+      }
+    }
+  } else {
+    viewMode.value = 'main';
+    loadHosts();
+    listen('host-changed', () => {
+      console.log("收到 host-changed 事件，刷新列表");
+      loadHosts();
+      loadGroups();
+    });
+  }
 });
 
 async function saveHost() {
@@ -105,50 +160,182 @@ async function saveHost() {
 
     if (isEditing.value) {
       await invoke("update_host", { host: hostToSave });
-      showToast("更新成功");
     } else {
       await invoke("add_host", { host: hostToSave });
-      showToast("保存成功");
     }
     
-    showAddModal.value = false;
-    isEditing.value = false;
-    newHost.value = { name: '', host: '', port: 22, username: 'root', password: '', private_key: '', group_id: null };
-    authType.value = 'password';
-    await loadHosts();
+    // 发出全局通知并关闭当前窗口（如果是独立模式）
+    await emit('host-changed');
+    
+    if (viewMode.value !== 'main') {
+      const win = getCurrentWebviewWindow();
+      await win.close();
+    } else {
+      // 兼容旧模式或内建模式（如果有的话）
+      showToast("保存成功");
+      showAddModal.value = false;
+      isEditing.value = false;
+      newHost.value = { name: '', host: '', port: 22, username: 'root', password: '', private_key: '', group_id: null };
+      await loadHosts();
+    }
   } catch (err) {
     saveError.value = "保存失败: " + String(err);
   }
 }
 
-function openAddModal() {
-  isEditing.value = false;
-  saveError.value = '';
-  newHost.value = { name: '', host: '', port: 22, username: 'root', password: '', private_key: '', group_id: null };
-  showAddModal.value = true;
+async function openAddModal() {
+  console.log("尝试打开‘添加主机’窗口，当前模式:", viewMode.value);
+  if (viewMode.value === 'main') {
+    try {
+      const webview = new WebviewWindow('add-host', {
+        url: 'index.html?view=add-host',
+        title: '添加主机',
+        width: 440,
+        height: 580,
+        resizable: false,
+        maximizable: false,
+        minimizable: false,
+      });
+      
+      webview.once('tauri://error', (e) => {
+        console.error('窗口创建失败事件:', e);
+        showToast("无法创建窗口，请检查权限", "error");
+      });
+      
+      webview.once('tauri://created', () => {
+        console.log("‘添加主机’窗口创建成功");
+      });
+    } catch (err) {
+      console.error("创建窗口时抛出异常:", err);
+      showToast("创建窗口失败: " + err, "error");
+    }
+  } else {
+    isEditing.value = false;
+    saveError.value = '';
+    newHost.value = { name: '', host: '', port: 22, username: 'root', password: '', private_key: '', group_id: null };
+    showAddModal.value = true;
+  }
 }
 
-function editHost(h: Host) {
-  isEditing.value = true;
-  saveError.value = '';
-  newHost.value = { ...h };
-  authType.value = h.private_key ? 'private_key' : 'password';
-  showAddModal.value = true;
+async function editHost(h: Host) {
+  console.log("尝试打开‘编辑主机’窗口, id:", h.id);
+  if (viewMode.value === 'main') {
+    try {
+      const webview = new WebviewWindow(`edit-host-${h.id}`, {
+        url: `index.html?view=edit-host&id=${h.id}`,
+        title: `编辑主机: ${h.name}`,
+        width: 440,
+        height: 580,
+        resizable: false,
+        maximizable: false,
+        minimizable: false,
+      });
+      
+      webview.once('tauri://error', (e) => {
+        console.error('编辑窗口创建失败事件:', e);
+      });
+    } catch (err) {
+      console.error("创建编辑窗口时抛出异常:", err);
+    }
+  } else {
+    isEditing.value = true;
+    saveError.value = '';
+    newHost.value = { ...h };
+    authType.value = h.private_key ? 'private_key' : 'password';
+    showAddModal.value = true;
+  }
 }
 
 async function saveGroup() {
-  if (!newGroupName.value.trim()) return;
+  saveError.value = "";
+  if (!newGroup.value.name.trim()) {
+    saveError.value = "分组名称不能为空";
+    return;
+  }
   try {
-    await invoke("add_group", { name: newGroupName.value, parentId: null });
-    newGroupName.value = "";
-    showGroupModal.value = false;
-    await loadGroups();
+    if (viewMode.value === 'edit-group' || (viewMode.value === 'main' && isEditing.value)) {
+      await invoke("update_group", { group: newGroup.value });
+    } else {
+      await invoke("add_group", { name: newGroup.value.name, parentId: newGroup.value.parent_id });
+    }
+    
+    await emit('host-changed');
+    
+    if (viewMode.value !== 'main') {
+      const win = getCurrentWebviewWindow();
+      await win.close();
+    } else {
+      showToast("分组保存成功");
+      showGroupModal.value = false;
+      newGroup.value = { name: '', parent_id: null };
+      await loadGroups();
+    }
   } catch (err) {
-    alert("创建分组失败: " + err);
+    saveError.value = "保存分组失败: " + String(err);
+  }
+}
+
+async function openAddGroupModal() {
+  if (viewMode.value === 'main') {
+    new WebviewWindow('add-group', {
+      url: 'index.html?view=add-group',
+      title: '添加分组',
+      width: 440,
+      height: 280,
+      resizable: false,
+      maximizable: false,
+      minimizable: false,
+    });
+  } else {
+    isEditing.value = false;
+    saveError.value = '';
+    newGroup.value = { name: '', parent_id: null };
+    showGroupModal.value = true;
+  }
+}
+
+async function editGroup(g: Group) {
+  if (viewMode.value === 'main') {
+    new WebviewWindow(`edit-group-${g.id}`, {
+      url: `index.html?view=edit-group&id=${g.id}`,
+      title: `编辑分组: ${g.name}`,
+      width: 440,
+      height: 280,
+      resizable: false,
+      maximizable: false,
+      minimizable: false,
+    });
+  } else {
+    isEditing.value = true;
+    saveError.value = '';
+    newGroup.value = { ...g };
+    showGroupModal.value = true;
+  }
+}
+
+async function deleteGroup(id: number) {
+  console.log("触发分组删除, ID:", id);
+  deletingGroupId.value = id;
+}
+
+async function confirmDeleteGroup() {
+  if (deletingGroupId.value === null) return;
+  try {
+    console.log("正在执行分组删除, ID:", deletingGroupId.value);
+    await invoke("delete_group", { id: deletingGroupId.value });
+    showToast("分组已删除");
+    await emit('host-changed');
+    await loadGroups();
+    await loadHosts();
+  } catch (err) {
+    showToast("删除分组失败: " + err, "error");
+  } finally {
+    deletingGroupId.value = null;
   }
 }
 
 async function deleteHost(id: number) {
+  console.log("触发主机删除, ID:", id);
   deletingHostId.value = id;
 }
 
@@ -156,7 +343,7 @@ async function confirmDelete() {
   if (deletingHostId.value === null) return;
   const id = deletingHostId.value;
   try {
-    console.log("正在从数据库删除主机:", id);
+    console.log("正在从数据库删除主机, ID:", id);
     await invoke("delete_host", { id });
     showToast("已删除主机");
     await loadHosts();
@@ -234,15 +421,25 @@ function closeSession(id: string) {
     activeSessionId.value = sessions.value.length > 0 ? sessions.value[sessions.value.length - 1].id : null;
   }
 }
+
+async function cancelForm() {
+  if (viewMode.value !== 'main') {
+    const win = getCurrentWebviewWindow();
+    await win.close();
+  } else {
+    showAddModal.value = false;
+  }
+}
 </script>
 
 <template>
-  <div class="app-layout">
+  <!-- Main Application Mode -->
+  <div v-if="viewMode === 'main'" class="app-layout">
     <aside class="sidebar">
       <div class="sidebar-header">
         <span class="sidebar-title">主机列表</span>
         <div class="header-actions">
-          <button class="add-btn" @click="showGroupModal = true" title="添加分组">
+          <button class="add-btn primary" @click="openAddGroupModal" title="添加分组">
             <span>📁</span>
           </button>
           <button class="add-btn primary" @click="openAddModal" title="添加主机">
@@ -268,6 +465,10 @@ function closeSession(id: string) {
           <div class="group-header">
             <span class="folder-icon">📂</span>
             <span class="group-name">{{ g.name }}</span>
+            <div class="group-actions">
+              <button class="icon-btn" @click.stop="editGroup(g)" title="编辑分组">✎</button>
+              <button class="icon-btn delete-btn" @click.stop="deleteGroup(g.id!)" title="删除分组">✗</button>
+            </div>
           </div>
           <div class="group-content">
             <div 
@@ -385,80 +586,166 @@ function closeSession(id: string) {
         />
       </div>
     </main>
-    <div v-if="showAddModal" class="modal-overlay">
-      <div class="modal-content premium-modal">
-        <h3>{{ isEditing ? '编辑主机' : '添加主机' }}</h3>
-        <input v-model="newHost.name" placeholder="备忘名称 (如：生产服务器一)" />
-        <input v-model="newHost.host" placeholder="IP 地址或域名" />
-        <input v-model.number="newHost.port" placeholder="SSH 端口" type="number" />
-        <input v-model="newHost.username" placeholder="登录用户名" />
-        
-        <select v-model="newHost.group_id" class="group-select">
-          <option :value="null">-- 选择分组 --</option>
-          <option v-for="g in groups" :key="g.id!" :value="g.id">
-            {{ g.name }}
-          </option>
-        </select>
-        
-        <div class="auth-toggle">
-          <label><input type="radio" value="password" v-model="authType"> 密码登录</label>
-          <label><input type="radio" value="private_key" v-model="authType"> 密钥登录</label>
+  </div>
+
+  <!-- Standalone Form / Modal -->
+  <div v-if="viewMode !== 'main' || showAddModal || showGroupModal" 
+    :class="viewMode === 'main' ? 'modal-overlay' : 'standalone-page'">
+    
+    <!-- Host Form -->
+    <div v-if="viewMode === 'add-host' || viewMode === 'edit-host' || showAddModal" 
+      class="modal-content" :class="{ 'premium-modal': isEditing, 'standalone-window': viewMode !== 'main' }">
+      <div v-if="viewMode === 'main'" class="modal-header-accent"></div>
+      <div v-if="viewMode === 'main'" class="form-header">
+        <span class="header-icon">{{ isEditing ? '📝' : '✨' }}</span>
+        <h3>{{ isEditing ? '编辑主机配置' : '添加新主机' }}</h3>
+      </div>
+      
+      <div class="form-scroll-area">
+        <div class="form-grid">
+          <div class="form-group animate-in" style="--delay: 0.1s">
+            <label>标识名称</label>
+            <input v-model="newHost.name" placeholder="e.g. 生产环境-Web01" autofocus />
+          </div>
+          
+          <div class="form-row animate-in" style="--delay: 0.2s">
+            <div class="form-group flex-2">
+              <label>主机地址 (IP/Domain)</label>
+              <input v-model="newHost.host" placeholder="192.168.1.100" />
+            </div>
+            <div class="form-group flex-1">
+              <label>端口</label>
+              <input v-model.number="newHost.port" type="number" />
+            </div>
+          </div>
+
+          <div class="form-group animate-in" style="--delay: 0.3s">
+            <label>业务分组</label>
+            <select v-model="newHost.group_id" class="group-select">
+              <option :value="null">未分组 (Default)</option>
+              <option v-for="g in groups" :key="g.id!" :value="g.id">{{ g.name }}</option>
+            </select>
+          </div>
+
+          <div class="form-group animate-in" style="--delay: 0.4s">
+            <label>SSH 用户名</label>
+            <input v-model="newHost.username" placeholder="root" />
+          </div>
+
+          <div class="form-group animate-in" style="--delay: 0.5s">
+            <label>认证方式</label>
+            <div class="auth-tabs">
+              <div class="auth-tab" :class="{ active: authType === 'password' }" @click="authType = 'password'">
+                <span>🔑</span> 密码认证
+              </div>
+              <div class="auth-tab" :class="{ active: authType === 'private_key' }" @click="authType = 'private_key'">
+                <span>📜</span> 私钥认证
+              </div>
+            </div>
+          </div>
+
+          <div v-if="authType === 'password'" class="form-group animate-in" style="--delay: 0.6s">
+            <label>登录密码</label>
+            <input v-model="newHost.password" type="password" placeholder="••••••••" />
+          </div>
+          
+          <div v-else class="form-group animate-in" style="--delay: 0.6s">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <label>私钥认证</label>
+              <div class="pk-toggle">
+                <span :class="{ active: pkType === 'path' }" @click="pkType = 'path'">路径</span>
+                <span :class="{ active: pkType === 'content' }" @click="pkType = 'content'">直接粘贴</span>
+              </div>
+            </div>
+            <input v-if="pkType === 'path'" v-model="newHost.private_key" placeholder="~/.ssh/id_rsa" />
+            <textarea v-else v-model="newHost.private_key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..." rows="4" style="font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;"></textarea>
+          </div>
         </div>
+      </div>
 
-        <input v-if="authType === 'password'" v-model="newHost.password" placeholder="登录密码" type="password" />
-        <textarea v-else v-model="newHost.private_key" placeholder="粘贴私钥内容 (-----BEGIN PRIVATE KEY-----...)"></textarea>
+      <div v-if="saveError" class="modal-error animate-in">{{ saveError }}</div>
 
-        <div v-if="saveError" class="error-msg">{{ saveError }}</div>
-
-        <div class="modal-actions">
-          <button @click="showAddModal = false">取消</button>
-          <button class="primary" @click="saveHost">{{ isEditing ? '更新' : '保存' }}</button>
-        </div>
+      <div class="modal-footer">
+        <button class="modal-btn secondary" @click="cancelForm">取消</button>
+        <button class="modal-btn primary" @click="saveHost">
+          {{ isEditing ? '更新配置' : '立即保存' }}
+        </button>
       </div>
     </div>
-    <div v-if="showGroupModal" class="modal-overlay">
-      <div class="modal-content confirm-modal">
-        <h3>创建新分组</h3>
-        <input v-model="newGroupName" placeholder="分组名称 (如：生产环境)" @keyup.enter="saveGroup" />
-        <div class="modal-actions">
-          <button @click="showGroupModal = false">取消</button>
-          <button class="primary" @click="saveGroup">创建</button>
+
+    <!-- Group Form -->
+    <div v-if="viewMode === 'add-group' || viewMode === 'edit-group' || showGroupModal" 
+      class="modal-content" :class="{ 'standalone-window': viewMode !== 'main' }">
+      <div v-if="viewMode === 'main'" class="form-header">
+        <span class="header-icon">{{ isEditing ? '📁' : '📁' }}</span>
+        <h3>{{ isEditing ? '编辑业务分组' : '创建新分组' }}</h3>
+      </div>
+      
+      <div class="form-scroll-area">
+        <div class="form-grid">
+          <div class="form-group animate-in" style="--delay: 0.1s">
+            <label>分组名称</label>
+            <input v-model="newGroup.name" placeholder="e.g. 生产环境" @keyup.enter="saveGroup" autofocus />
+          </div>
         </div>
       </div>
-    </div>
-    <!-- 删除确认 Modal -->
-    <div v-if="deletingHostId !== null" class="modal-overlay">
-      <div class="modal-content confirm-modal">
-        <h3>确认删除</h3>
-        <p>确定要从主机列表中永久删除该配置吗？</p>
-        <div class="modal-actions">
-          <button @click="deletingHostId = null">取消</button>
-          <button class="primary danger" @click="confirmDelete">确认删除</button>
-        </div>
+
+      <div v-if="saveError" class="modal-error animate-in">{{ saveError }}</div>
+
+      <div class="modal-footer">
+        <button class="modal-btn secondary" @click="cancelForm">取消</button>
+        <button class="modal-btn primary" @click="saveGroup">
+          {{ isEditing ? '更新分组' : '立即创建' }}
+        </button>
       </div>
     </div>
-    <!-- Toast Notifications -->
-    <div class="toast-container">
-      <div v-for="t in toasts" :key="t.id" class="toast" :class="t.type">
-        {{ t.message }}
+  </div>
+
+  <!-- 分组删除确认 Modal -->
+  <div v-if="deletingGroupId !== null" class="modal-overlay">
+    <div class="modal-content confirm-modal">
+      <h3 style="color: var(--danger)">确认删除分组</h3>
+      <p style="color: var(--text-dim); line-height: 1.6;">确定要删除该分组吗？分组内的虚拟主机会被移至“未分组”。</p>
+      <div class="modal-actions" style="margin-top: 24px;">
+        <button class="modal-btn secondary" @click="deletingGroupId = null">取消</button>
+        <button class="modal-btn primary danger" @click="confirmDeleteGroup">确认删除</button>
       </div>
+    </div>
+  </div>
+
+  <!-- 删除确认 Modal -->
+  <div v-if="deletingHostId !== null" class="modal-overlay">
+    <div class="modal-content confirm-modal">
+      <h3 style="color: var(--danger)">确认删除</h3>
+      <p style="color: var(--text-dim); line-height: 1.6;">确定要删除该主机吗？此操作不可撤销。</p>
+      <div class="modal-actions" style="margin-top: 24px;">
+        <button class="modal-btn secondary" @click="deletingHostId = null">取消</button>
+        <button class="modal-btn primary danger" @click="confirmDelete">确认删除</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container">
+    <div v-for="t in toasts" :key="t.id" class="toast" :class="t.type">
+      {{ t.message }}
     </div>
   </div>
 </template>
 
 <style>
 :root {
-  --bg-dark: hsl(222, 18%, 13%);
-  --sidebar-bg: hsl(222, 20%, 10%);
-  --sidebar-hover: hsl(222, 20%, 18%);
-  --border-color: hsla(222, 15%, 25%, 0.6);
-  --accent-color: hsl(210, 100%, 60%);
-  --accent-hover: hsl(210, 100%, 68%);
-  --text-main: hsl(220, 10%, 94%);
-  --text-dim: hsl(220, 10%, 70%);
-  --danger: hsl(0, 84%, 65%);
-  --glass-bg: hsla(0, 0%, 100%, 0.05);
-  --glass-border: hsla(0, 0%, 100%, 0.12);
+  --bg-dark: hsl(0, 0%, 98%);
+  --sidebar-bg: hsl(0, 0%, 94%);
+  --sidebar-hover: hsl(0, 0%, 90%);
+  --border-color: hsla(0, 0%, 0%, 0.1);
+  --accent-color: hsl(210, 100%, 52%);
+  --accent-hover: hsl(210, 100%, 45%);
+  --text-main: hsl(0, 0%, 12%);
+  --text-dim: hsl(0, 0%, 45%);
+  --danger: hsl(0, 80%, 50%);
+  --glass-bg: hsla(0, 0%, 0%, 0.03);
+  --glass-border: hsla(0, 0%, 0%, 0.08);
 }
 
 body, html, #app {
@@ -535,27 +822,40 @@ body, html, #app {
   font-size: 0.9rem;
 }
 
-.header-actions { display: flex; gap: 6px; }
+.header-actions { display: flex; gap: 4px; padding: 2px; background: rgba(0,0,0,0.03); border-radius: 8px; }
 
 .add-btn {
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
-  color: var(--text-main);
-  width: 26px; height: 26px;
+  background: white;
+  border: 1px solid var(--border-color);
+  color: var(--text-dim);
+  width: 28px; height: 28px;
   border-radius: 6px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   padding: 0;
-  font-size: 0.7rem;
+  font-size: 0.85rem;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
 }
 .add-btn:hover {
-  background: var(--sidebar-hover);
-  border-color: var(--accent-color);
+  background: var(--bg-dark);
+  color: var(--text-main);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.08);
 }
-.add-btn.primary { background: var(--accent-color); color: white; border: none; }
+.add-btn.primary { 
+  background: var(--accent-color); 
+  color: white; 
+  border: none;
+  font-weight: bold;
+  font-size: 1rem;
+}
+.add-btn.primary:hover {
+  background: var(--accent-hover);
+  box-shadow: 0 4px 12px rgba(57, 108, 216, 0.3);
+} 
 
 .host-list {
   flex: 1;
@@ -573,8 +873,17 @@ body, html, #app {
   font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
+  transition: all 0.2s;
 }
 .group-header:hover { background: var(--glass-bg); color: var(--text-main); }
+.group-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  opacity: 0;
+}
+.group-header:hover .group-actions { opacity: 1; }
+.group-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder-icon { margin-right: 8px; font-size: 0.9rem; opacity: 0.7; }
 
 .group-content {
@@ -599,23 +908,23 @@ body, html, #app {
 .host-info { display: flex; flex-direction: column; overflow: hidden; }
 .host-name-row { display: flex; align-items: center; gap: 6px; }
 .status-dot {
-  min-width: 6px; height: 6px; border-radius: 50%;
-  background: #4caf50;
-  box-shadow: 0 0 6px #4caf50;
+  min-width: 8px; height: 8px; border-radius: 50%;
+  background: #34c759;
+  box-shadow: 0 0 8px rgba(52, 199, 89, 0.4);
   animation: pulse 2s infinite;
 }
 @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
-.host-name { font-size: 0.8rem; font-weight: 500; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.host-item:hover .host-name { color: var(--text-main); }
-.host-ip { font-size: 0.65rem; color: var(--text-dim); opacity: 0.4; font-family: 'JetBrains Mono', monospace; }
+.host-name { font-size: 0.85rem; font-weight: 500; color: #1a1a1a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.host-item:hover .host-name { color: var(--accent-color); }
+.host-ip { font-size: 0.7rem; color: #4a4a4a; opacity: 1; font-family: 'JetBrains Mono', monospace; }
 
-.host-actions { display: flex; gap: 4px; opacity: 0; }
+.host-actions { display: flex; gap: 8px; opacity: 0; }
 .host-item:hover .host-actions { opacity: 1; }
 
 .icon-btn {
-  background: none; border: none; padding: 2px; border-radius: 4px;
+  background: none; border: none; padding: 4px; border-radius: 4px;
   color: var(--text-dim); cursor: pointer; transition: 0.2s;
-  font-size: 0.7rem;
+  font-size: 0.85rem;
 }
 .icon-btn:hover { color: var(--accent-color); background: var(--border-color); }
 .delete-btn:hover { color: var(--danger) !important; }
@@ -718,13 +1027,23 @@ body, html, #app {
 }
 .close-btn:hover { opacity: 1; transform: scale(1.1); }
 
-.terminal-wrapper { flex: 1; position: relative; background: #000; overflow: hidden; }
+.terminal-wrapper { 
+  flex: 1; 
+  position: relative; 
+  background: #000; 
+  overflow: hidden; 
+  display: flex;
+}
+
+.terminal-wrapper > div:not(.terminal-overlay):not(.terminal-empty) {
+  flex: 1;
+}
 
 /* Terminal Empty & Loading */
 .terminal-overlay {
-  position: absolute; inset: 0; background: rgba(0,0,0,0.8);
+  position: absolute; inset: 0; background: rgba(255,255,255,0.7);
   display: flex; flex-direction: column; align-items: center;
-  justify-content: center; z-index: 100; backdrop-filter: blur(4px);
+  justify-content: center; z-index: 100; backdrop-filter: blur(8px);
 }
 .loader {
   width: 40px; height: 40px; border: 3px solid var(--glass-border);
@@ -735,10 +1054,16 @@ body, html, #app {
 
 .terminal-empty {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  background: radial-gradient(circle at center, hsla(215, 30%, 15%, 1) 0%, var(--bg-dark) 100%);
+  background: radial-gradient(circle at center, hsl(210, 30%, 94%) 0%, var(--bg-dark) 100%);
 }
 .empty-hero { text-align: center; }
-.empty-hero h1 { font-size: 2.5rem; margin-bottom: 8px; font-weight: 800; background: linear-gradient(135deg, #fff 0%, #396cd8 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.empty-hero h1 { 
+  font-size: 2.5rem; margin-bottom: 8px; font-weight: 800; 
+  background: linear-gradient(135deg, var(--text-main) 0%, var(--accent-color) 100%); 
+  -webkit-background-clip: text; 
+  background-clip: text;
+  -webkit-text-fill-color: transparent; 
+}
 .empty-hero p { color: var(--text-dim); font-size: 1.1rem; margin-bottom: 32px; }
 .hero-actions button {
   background: var(--accent-color); color: white; border: none;
@@ -749,8 +1074,10 @@ body, html, #app {
 
 /* Modal Styling */
 .modal-overlay {
-  background: rgba(0, 0, 0, 0.75);
-  backdrop-filter: blur(12px);
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -758,15 +1085,14 @@ body, html, #app {
 }
 
 .modal-content {
-  background: var(--sidebar-bg);
+  background: white;
   border: 1px solid var(--border-color);
   padding: 32px;
-  border-radius: 16px;
+  border-radius: 20px;
   width: 440px;
-  box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+  box-shadow: 0 40px 100px rgba(0,0,0,0.1);
 }
 
-.modal-content.premium-modal { border-color: var(--accent-color); }
 
 .modal-content h3 {
   margin-top: 0;
@@ -782,15 +1108,15 @@ body, html, #app {
 }
 
 .modal-content input, .modal-content textarea, .group-select {
-  background: var(--bg-dark);
+  background: #fdfdfd;
   border: 1px solid var(--border-color);
   color: var(--text-main);
   padding: 12px 14px;
-  border-radius: 10px;
+  border-radius: 12px;
   font-size: 0.95rem;
   transition: all 0.2s;
 }
-.modal-content input:focus { border-color: var(--accent-color); outline: none; }
+.modal-content input:focus { border-color: var(--accent-color); outline: none; box-shadow: 0 0 0 3px hsla(210, 100%, 50%, 0.1); }
 
 .modal-actions {
   display: flex;
@@ -825,18 +1151,18 @@ body, html, #app {
   pointer-events: none;
 }
 .toast {
-  background: var(--sidebar-bg);
+  background: white;
   border: 1px solid var(--border-color);
-  padding: 12px 20px;
-  border-radius: 10px;
+  padding: 14px 24px;
+  border-radius: 14px;
   color: var(--text-main);
   font-size: 0.85rem;
-  box-shadow: 0 12px 32px rgba(0,0,0,0.4);
-  animation: slideInRight 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28);
-  min-width: 200px;
-  max-width: 320px;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.08);
+  animation: slideInRight 0.4s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+  min-width: 240px;
+  max-width: 360px;
   pointer-events: auto;
-  border-left-width: 4px;
+  border-left-width: 5px;
 }
 .toast.success { border-left-color: var(--accent-color); }
 .toast.error { border-left-color: var(--danger); }
@@ -845,6 +1171,136 @@ body, html, #app {
   from { transform: translateX(100%); opacity: 0; }
   to { transform: translateX(0); opacity: 1; }
 }
+
+/* Standalone Page & Modern Form */
+.standalone-page {
+  height: 100vh; width: 100vw;
+  display: flex; background: var(--bg-dark);
+  align-items: center; justify-content: center;
+}
+.standalone-window {
+  width: 100% !important; height: 100% !important;
+  border-radius: 0 !important; box-shadow: none !important;
+  margin: 0 !important; display: flex; flex-direction: column;
+  padding: 0 !important;
+  background: var(--sidebar-bg);
+}
+.form-header {
+  padding: 24px 32px 8px;
+  display: flex; align-items: center; gap: 8px;
+  position: relative;
+  user-select: none;
+}
+.win-close-btn {
+  position: absolute; right: 24px; top: 24px;
+  background: transparent; border: none; color: var(--text-dim);
+  opacity: 0.5; cursor: pointer; font-size: 1rem;
+  transition: all 0.2s;
+}
+.win-close-btn:hover { opacity: 1; color: var(--danger); transform: scale(1.1); }
+.header-icon { font-size: 1.2rem; filter: grayscale(0.5); }
+.standalone-window h3 {
+  border: none; margin: 0; padding: 0;
+  font-size: 1rem; font-weight: 700;
+  color: var(--text-main);
+  opacity: 0.8;
+}
+.form-scroll-area {
+  flex: 1; overflow-y: auto; overflow-x: hidden; padding: 0 32px 24px;
+}
+/* Custom Scrollbar */
+.form-scroll-area::-webkit-scrollbar {
+  width: 4px;
+}
+.form-scroll-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+.form-scroll-area::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 10px;
+}
+.form-scroll-area:hover::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.form-grid { display: flex; flex-direction: column; gap: 18px; padding-top: 5px; }
+.form-row { display: flex; gap: 12px; }
+.flex-2 { flex: 2; }
+.flex-1 { flex: 1; }
+.form-group { display: flex; flex-direction: column; gap: 6px; }
+.form-group label { font-size: 0.7rem; color: #4a4a4a; font-weight: 700; opacity: 0.9; text-transform: uppercase; letter-spacing: 0.02em; }
+
+.modal-content input, .modal-content textarea, .group-select {
+  background: var(--bg-dark);
+  border: 1px solid var(--border-color);
+  padding: 0 12px; 
+  height: 38px;
+  border-radius: 8px; 
+  font-size: 0.85rem;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: none;
+  box-sizing: border-box;
+  width: 100%;
+  line-height: 36px;
+  color: var(--text-main);
+}
+.modal-content textarea { height: auto; padding: 10px 12px; line-height: 1.4; resize: vertical; }
+.pk-toggle { font-size: 0.65rem; display: flex; gap: 8px; color: var(--text-dim); }
+.pk-toggle span { cursor: pointer; padding: 2px 6px; border-radius: 4px; opacity: 0.5; }
+.pk-toggle span.active { background: var(--border-color); opacity: 1; color: var(--text-main); font-weight: 600; }
+.modal-content input:focus, .group-select:focus {
+  border-color: var(--accent-color); background: white;
+  box-shadow: 0 0 0 2px hsla(210, 100%, 52%, 0.05);
+  outline: none;
+}
+/* Standardize select appearance */
+.group-select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.5 3.5l2.5 2.5 2.5-2.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 32px;
+}
+
+.auth-tabs {
+  display: flex; gap: 4px; padding: 3px;
+  background: rgba(0,0,0,0.03); border-radius: 10px;
+}
+.auth-tab {
+  flex: 1; padding: 6px; text-align: center; font-size: 0.75rem;
+  border-radius: 7px; cursor: pointer; transition: all 0.2s;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  color: var(--text-dim); font-weight: 500; border: none; background: transparent;
+}
+.auth-tab.active {
+  background: white; color: var(--accent-color);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.05); font-weight: 600;
+}
+
+.modal-footer {
+  padding: 16px 32px; border-top: 1px solid var(--border-color);
+  display: flex; justify-content: flex-end; gap: 10px;
+  background: transparent;
+}
+.modal-btn { 
+  padding: 8px 18px; border-radius: 8px; font-weight: 600; 
+  cursor: pointer; transition: all 0.2s; font-size: 0.8rem;
+  border: 1px solid var(--border-color);
+}
+.modal-btn.primary { 
+  background: var(--accent-color); color: white; border: none;
+}
+.modal-btn.primary:hover { opacity: 0.95; }
+.modal-btn.secondary { background: white; color: var(--text-dim); }
+.modal-btn.secondary:hover { color: var(--text-main); background: var(--bg-dark); }
+
+.animate-in {
+  animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  opacity: 0; transform: translateY(5px);
+  animation-delay: var(--delay, 0s);
+}
+@keyframes slideUp { to { opacity: 1; transform: translateY(0); } }
+.modal-error { color: var(--danger); font-size: 0.75rem; font-weight: 600; padding: 8px 32px; background: hsla(0, 80%, 50%, 0.05); margin-bottom: 8px; }
 </style>
 
 <style scoped>

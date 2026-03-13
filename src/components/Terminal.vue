@@ -32,7 +32,7 @@ onMounted(async () => {
     fontSize: 14,
     fontFamily: '"Cascadia Code", Menlo, Monaco, "Courier New", monospace',
     theme: {
-      background: '#1e1e1e',
+      background: '#000000',
       foreground: '#d4d4d4',
     },
     allowProposedApi: true
@@ -153,11 +153,13 @@ defineExpose({
 .terminal-container {
   width: 100%;
   height: 100%;
-  background-color: #1e1e1e;
+  background-color: #000;
   cursor: text;
+  padding: 8px; /* Internal character padding */
+  box-sizing: border-box;
 }
 
 :deep(.xterm-viewport) {
-  background-color: #1e1e1e !important;
+  background-color: #000 !important;
 }
 </style>

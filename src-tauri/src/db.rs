@@ -145,6 +145,29 @@ pub async fn get_hosts(app_handle: AppHandle) -> Result<Vec<Host>, String> {
 }
 
 #[tauri::command]
+pub async fn get_host(app_handle: AppHandle, id: i32) -> Result<Host, String> {
+    let conn = get_conn(&app_handle)?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, group_id, host, port, username, password, private_key FROM hosts WHERE id = ?1")
+        .map_err(|e| e.to_string())?;
+    let host = stmt
+        .query_row([id], |row| {
+            Ok(Host {
+                id: Some(row.get(0)?),
+                name: row.get(1)?,
+                group_id: row.get(2)?,
+                host: row.get(3)?,
+                port: row.get(4)?,
+                username: row.get(5)?,
+                password: row.get(6)?,
+                private_key: row.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(host)
+}
+
+#[tauri::command]
 pub async fn update_host(app_handle: AppHandle, host: Host) -> Result<(), String> {
     let conn = get_conn(&app_handle)?;
     if let Some(id) = host.id {
@@ -206,4 +229,47 @@ pub async fn get_groups(app_handle: AppHandle) -> Result<Vec<Group>, String> {
         groups.push(group.map_err(|e| e.to_string())?);
     }
     Ok(groups)
+}
+#[tauri::command]
+pub async fn get_group(app_handle: AppHandle, id: i32) -> Result<Group, String> {
+    let conn = get_conn(&app_handle)?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, parent_id FROM groups WHERE id = ?1")
+        .map_err(|e| e.to_string())?;
+    let group = stmt
+        .query_row([id], |row| {
+            Ok(Group {
+                id: Some(row.get(0)?),
+                name: row.get(1)?,
+                parent_id: row.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(group)
+}
+
+#[tauri::command]
+pub async fn update_group(app_handle: AppHandle, group: Group) -> Result<(), String> {
+    let conn = get_conn(&app_handle)?;
+    if let Some(id) = group.id {
+        conn.execute(
+            "UPDATE groups SET name=?1, parent_id=?2 WHERE id=?3",
+            (&group.name, &group.parent_id, id),
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        Err("Group ID missing".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn delete_group(app_handle: AppHandle, id: i32) -> Result<(), String> {
+    let conn = get_conn(&app_handle)?;
+    // 先将属于该分组的主机设为未分组
+    conn.execute("UPDATE hosts SET group_id = NULL WHERE group_id = ?1", [id])
+        .map_err(|e| e.to_string())?;
+    // 再删除分组
+    conn.execute("DELETE FROM groups WHERE id = ?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
