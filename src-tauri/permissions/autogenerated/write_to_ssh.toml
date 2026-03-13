@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-write-to-ssh"
+description = "Enables the write_to_ssh command without any pre-configured scope."
+commands.allow = ["write_to_ssh"]
+
+[[permission]]
+identifier = "deny-write-to-ssh"
+description = "Denies the write_to_ssh command without any pre-configured scope."
+commands.deny = ["write_to_ssh"]
