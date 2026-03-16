@@ -7,13 +7,15 @@
     "add-host",
     "edit-host-*",
     "add-group",
-    "edit-group-*"
+    "edit-group-*",
+    "settings",
+    "credentials"
   ],
   "permissions": [
     "core:default",
     "opener:default",
     "core:event:default",
-    "dialog:allow-open",
+    "dialog:default",
     "allow-greet",
     "allow-add-host",
     "allow-get-host",
@@ -45,9 +47,11 @@
     "allow-get-snippets",
     "allow-add-snippet",
     "allow-delete-snippet",
+    "allow-update-snippet",
     "allow-get-credentials",
     "allow-add-credential",
     "allow-delete-credential",
-    "allow-update-credential"
+    "allow-update-credential",
+    "allow-ask-ai"
   ]
 }

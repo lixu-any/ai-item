@@ -9,6 +9,7 @@ fn greet(name: &str) -> String {
 mod db;
 mod ssh;
 mod pty;
+mod ai;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -76,10 +77,12 @@ pub fn run() {
             db::add_snippet,
             db::get_snippets,
             db::delete_snippet,
+            db::update_snippet,
             db::add_credential,
             db::get_credentials,
             db::delete_credential,
-            db::update_credential
+            db::update_credential,
+            ai::ask_ai
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

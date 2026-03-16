@@ -10,6 +10,8 @@ import SpotlightSearch from "./components/SpotlightSearch.vue";
 import SnippetSidebar from "./components/SnippetSidebar.vue";
 import CredentialManager from "./components/CredentialManager.vue";
 import SvgIcon from "./components/SvgIcon.vue";
+import SettingsModal from "./components/SettingsModal.vue";
+import AiSidebar from "./components/AiSidebar.vue";
 
 interface SessionTab {
   id: string;
@@ -58,6 +60,7 @@ let toastIdCounter = 0;
 
 const showSpotlight = ref(false);
 const showSnippetSidebar = ref(false);
+const showAiSidebar = ref(false);
 const showCredentialManager = ref(false);
 const terminalRefs = ref<Record<string, any>>({});
 
@@ -90,7 +93,7 @@ function handleSelectCredential(c: any) {
   showToast(`已应用凭据: ${c.name}`);
 }
 
-const viewMode = ref<'main' | 'add-host' | 'edit-host' | 'add-group' | 'edit-group'>('main');
+const viewMode = ref<'main' | 'add-host' | 'edit-host' | 'add-group' | 'edit-group' | 'settings' | 'credentials'>('main');
 const hostId = ref<number | null>(null);
 const groupId = ref<number | null>(null);
 const deletingGroupId = ref<number | null>(null);
@@ -209,6 +212,10 @@ onMounted(async () => {
         showToast("加载分组信息失败: " + err, "error");
       }
     }
+  } else if (view === 'settings') {
+    viewMode.value = 'settings';
+  } else if (view === 'credentials') {
+    viewMode.value = 'credentials';
   } else {
     viewMode.value = 'main';
     loadHosts();
@@ -299,6 +306,50 @@ async function openAddModal() {
     saveError.value = '';
     newHost.value = { name: '', host: '', port: 22, username: 'root', password: '', private_key: '', group_id: null };
     showAddModal.value = true;
+  }
+}
+
+function openSettingsWindow() {
+  if (viewMode.value === 'main') {
+    try {
+      const webview = new WebviewWindow('settings', {
+        url: 'index.html?view=settings',
+        title: '全局设置',
+        width: 480,
+        height: 520,
+        resizable: false,
+        maximizable: false,
+        minimizable: false,
+      });
+      
+      webview.once('tauri://error', (e) => {
+        console.error('设置窗口创建失败事件:', e);
+        showToast("无法创建窗口，请检查权限或确认窗口已打开", "error");
+      });
+    } catch (err) {
+      console.error("创建设置窗口时抛出异常:", err);
+    }
+  }
+}
+
+function openCredentialWindow() {
+  if (viewMode.value === 'main') {
+    try {
+      const webview = new WebviewWindow('credentials', {
+        url: 'index.html?view=credentials',
+        title: '凭据中心',
+        width: 560,
+        height: 560,
+        resizable: false,
+        maximizable: false,
+        minimizable: false,
+      });
+      webview.once('tauri://error', () => {
+        showToast("无法创建凭据中心窗口，请确认窗口已打开", "error");
+      });
+    } catch (err) {
+      console.error("创建凭据中心窗口时抛出异常:", err);
+    }
   }
 }
 
@@ -806,15 +857,15 @@ async function saveWindowSize() {
           <SvgIcon name="snippet" size="18" class="footer-icon" />
           <span>命令片段</span>
         </div>
-        <div class="footer-item" title="AI 助手">
+        <div class="footer-item" @click="showAiSidebar = !showAiSidebar" :class="{ active: showAiSidebar }" title="AI 助手">
           <SvgIcon name="ai" size="18" class="footer-icon" />
           <span>AI 助手</span>
         </div>
-        <div class="footer-item" title="凭据管理" @click="showCredentialManager = true">
+        <div class="footer-item" title="凭据管理" @click="openCredentialWindow">
           <SvgIcon name="credential" size="18" class="footer-icon" />
           <span>凭据中心</span>
         </div>
-        <div class="footer-item" title="设置">
+        <div class="footer-item" title="设置" @click="openSettingsWindow">
           <SvgIcon name="settings" size="18" class="footer-icon" />
           <span>设置</span>
         </div>
@@ -869,6 +920,7 @@ async function saveWindowSize() {
       </div>
     </main>
     <SnippetSidebar v-if="showSnippetSidebar" @run-snippet="handleRunSnippet" @close="showSnippetSidebar = false" />
+    <AiSidebar v-if="showAiSidebar" @run-command="handleRunSnippet" @toast="showToast" @close="showAiSidebar = false" />
   </div>
 
   <!-- Standalone Form / Modal -->
@@ -985,6 +1037,14 @@ async function saveWindowSize() {
           {{ isEditing ? '更新分组' : '立即创建' }}
         </button>
       </div>
+    </div>
+        <div v-if="viewMode === 'settings'" class="modal-content standalone-window premium-modal" style="width: 100%; height: 100vh; border-radius: 0; padding: 0; background-color: var(--bg-main);">
+      <SettingsModal @close="cancelForm" @toast="showToast" />
+    </div>
+
+    <!-- Credentials Standalone -->
+    <div v-if="viewMode === 'credentials'" class="modal-content standalone-window premium-modal" style="width: 100%; height: 100vh; border-radius: 0; padding: 0; background-color: var(--bg-main);">
+      <CredentialManager @close="cancelForm" @select="() => {}" @toast="(t: any) => showToast(t.message, t.type)" />
     </div>
   </div>
 

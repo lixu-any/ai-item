@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-ask-ai"
+description = "Enables the ask_ai command."
+commands.allow = ["ask_ai"]

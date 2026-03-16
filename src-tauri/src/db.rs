@@ -330,6 +330,19 @@ pub async fn delete_snippet(app_handle: AppHandle, id: i32) -> Result<(), String
     Ok(())
 }
 
+#[tauri::command]
+pub async fn update_snippet(app_handle: AppHandle, snippet: Snippet) -> Result<(), String> {
+    if snippet.id.is_none() {
+        return Err("Snippet ID is required for update".into());
+    }
+    let conn = get_conn(&app_handle)?;
+    conn.execute(
+        "UPDATE snippets SET name = ?1, command = ?2, category = ?3 WHERE id = ?4",
+        (&snippet.name, &snippet.command, &snippet.group, snippet.id.unwrap()),
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // Credential commands
 #[tauri::command]
 pub async fn add_credential(app_handle: AppHandle, cred: Credential) -> Result<i32, String> {
