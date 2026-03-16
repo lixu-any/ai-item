@@ -191,8 +191,13 @@ onMounted(async () => {
       viewMode.value = 'edit-host';
       hostId.value = parseInt(id);
       try {
-        const h = await invoke<Host>("get_host", { id: hostId.value });
-        editHost(h);
+        const h = savedHosts.value.find(h => h.id === hostId.value) ?? 
+                  (await invoke<Host[]>("get_hosts")).find(h => h.id === hostId.value);
+        if (h) {
+          editHost(h);
+        } else {
+          showToast("未找到主机信息", "error");
+        }
       } catch (err) {
         showToast("加载主机信息失败: " + err, "error");
       }
@@ -206,8 +211,13 @@ onMounted(async () => {
       viewMode.value = 'edit-group';
       groupId.value = parseInt(id);
       try {
-        const g = await invoke<Group>("get_group", { id: groupId.value });
-        editGroup(g);
+        const g = groups.value.find(g => g.id === groupId.value) ??
+                  (await invoke<Group[]>("get_groups")).find(g => g.id === groupId.value);
+        if (g) {
+          editGroup(g);
+        } else {
+          showToast("未找到分组信息", "error");
+        }
       } catch (err) {
         showToast("加载分组信息失败: " + err, "error");
       }
@@ -315,11 +325,12 @@ function openSettingsWindow() {
       const webview = new WebviewWindow('settings', {
         url: 'index.html?view=settings',
         title: '全局设置',
-        width: 480,
-        height: 520,
+        width: 1000,
+        height: 800,
         resizable: false,
         maximizable: false,
         minimizable: false,
+        center: true,
       });
       
       webview.once('tauri://error', (e) => {
@@ -350,6 +361,39 @@ function openCredentialWindow() {
     } catch (err) {
       console.error("创建凭据中心窗口时抛出异常:", err);
     }
+  }
+}
+
+// 从 add-host/edit-host 独立窗口中选择凭据
+let credPickerUnlisten: (() => void) | null = null;
+async function openCredentialPicker() {
+  // 先清理旧监听
+  if (credPickerUnlisten) { credPickerUnlisten(); credPickerUnlisten = null; }
+
+  // 监听凭据选择事件（全局，任意窗口发出都会收到）
+  const { listen } = await import('@tauri-apps/api/event');
+  credPickerUnlisten = await listen<any>('credential-picked', (event) => {
+    handleSelectCredential(event.payload);
+    if (credPickerUnlisten) { credPickerUnlisten(); credPickerUnlisten = null; }
+  });
+
+  try {
+    const webview = new WebviewWindow('credentials-picker', {
+      url: 'index.html?view=credentials&mode=picker',
+      title: '选择凭据',
+      width: 500,
+      height: 480,
+      resizable: false,
+      maximizable: false,
+      minimizable: false,
+      center: true,
+    });
+    // 窗口关闭时清理监听
+    webview.once('tauri://destroyed', () => {
+      if (credPickerUnlisten) { credPickerUnlisten(); credPickerUnlisten = null; }
+    });
+  } catch (err) {
+    console.error("创建凭据选择窗口时抛出异常:", err);
   }
 }
 
@@ -417,7 +461,7 @@ async function openAddGroupModal() {
       url: 'index.html?view=add-group',
       title: '添加分组',
       width: 440,
-      height: 280,
+      height: 360,
       resizable: false,
       maximizable: false,
       minimizable: false,
@@ -436,7 +480,7 @@ async function editGroup(g: Group) {
       url: `index.html?view=edit-group&id=${g.id}`,
       title: `编辑分组: ${g.name}`,
       width: 440,
-      height: 280,
+      height: 360,
       resizable: false,
       maximizable: false,
       minimizable: false,
@@ -519,10 +563,14 @@ async function connectToHost(host: Host) {
   connecting.value = true;
   connError.value = "";
   
+  const titleModeStr = await invoke<string | null>('get_setting', { key: 'tab_title_mode' }).catch(() => null);
+  const titleMode = titleModeStr || 'ip';
+  const tabTitle = titleMode === 'name' ? host.name : `${host.username}@${host.host}`;
+
   const sessionId = crypto.randomUUID();
   sessions.value.push({
     id: sessionId,
-    title: `${host.username}@${host.host}`,
+    title: tabTitle,
     type: 'ssh',
     host: host,
     connected: true
@@ -534,6 +582,12 @@ async function connectToHost(host: Host) {
 
   try {
     console.log("正在调用 open_ssh_session...");
+    // 读取用户设置中的超时和 keepalive 配置
+    const timeoutStr = await invoke<string | null>('get_setting', { key: 'ssh_connect_timeout' });
+    const keepaliveStr = await invoke<string | null>('get_setting', { key: 'ssh_keepalive' });
+    const connectTimeoutSecs = timeoutStr ? parseInt(timeoutStr) : 15;
+    const keepaliveSecs = keepaliveStr ? parseInt(keepaliveStr) : 60;
+
     await invoke("open_ssh_session", {
       sessionId: sessionId,
       host: host.host,
@@ -542,7 +596,9 @@ async function connectToHost(host: Host) {
       password: host.password || null,
       privateKey: host.private_key || null,
       cols: 80,
-      rows: 24
+      rows: 24,
+      connectTimeoutSecs,
+      keepaliveSecs,
     });
     showToast(`成功连接到 ${host.name}`);
   } catch (err) {
@@ -805,7 +861,7 @@ async function saveWindowSize() {
         >
           <div class="group-header" @click="collapsedUnGrouped = !collapsedUnGrouped">
             <span class="chevron">›</span>
-            <span class="folder-icon">📂</span>
+            <SvgIcon name="group" size="16" class="folder-icon" />
             <span class="group-name">未分组</span>
           </div>
           <div class="group-content" v-show="!collapsedUnGrouped || searchQuery">
@@ -898,11 +954,18 @@ async function saveWindowSize() {
         </div>
         <div v-if="sessions.length === 0 && !connecting" class="terminal-empty">
           <div class="empty-hero">
-            <h1>AI-Term Shell</h1>
-            <p>基于人工智能的高效 SSH 终端</p>
+            <div class="hero-badge">v1.0.0</div>
+            <h1>Nixu</h1>
+            <p class="hero-slogan">Your servers, your AI, your terminal.</p>
+            <p class="hero-desc">基于人工智能的高效 SSH 终端 · 多会话管理 · AI 内建助手</p>
             <div class="hero-actions">
               <button @click="openAddModal">新增服务器</button>
               <button class="secondary-btn" @click="newLocalTerminal">本地终端</button>
+            </div>
+            <div class="hero-footer">
+              <span>Made with ♥ by <strong>lixu</strong></span>
+              <span class="hero-dot">·</span>
+              <span>Powered by Tauri + Vue</span>
             </div>
           </div>
         </div>
@@ -934,7 +997,7 @@ async function saveWindowSize() {
       <div class="form-header">
         <SvgIcon :name="isEditing ? 'edit' : 'add'" size="20" class="header-icon" />
         <h3>{{ isEditing ? '编辑主机配置' : '添加新主机' }}</h3>
-        <button class="use-cred-btn" @click="showCredentialManager = true">复用凭据</button>
+        <button class="use-cred-btn" @click="viewMode !== 'main' ? openCredentialPicker() : (showCredentialManager = true)">复用凭据</button>
       </div>
       
       <div class="form-scroll-area">
@@ -972,10 +1035,12 @@ async function saveWindowSize() {
             <label>认证方式</label>
             <div class="auth-tabs">
               <div class="auth-tab" :class="{ active: authType === 'password' }" @click="authType = 'password'">
-                <span>🔑</span> 密码认证
+                <SvgIcon name="credential" size="14" />
+                <span>密码认证</span>
               </div>
               <div class="auth-tab" :class="{ active: authType === 'private_key' }" @click="authType = 'private_key'">
-                <span>📜</span> 私钥认证
+                <SvgIcon name="snippet" size="14" />
+                <span>私钥认证</span>
               </div>
             </div>
           </div>
@@ -1015,12 +1080,16 @@ async function saveWindowSize() {
     <!-- Group Form -->
     <div v-if="viewMode === 'add-group' || viewMode === 'edit-group' || showGroupModal" 
       class="modal-content" :class="{ 'standalone-window': viewMode !== 'main' }">
-      <div v-if="viewMode === 'main'" class="form-header">
-        <span class="header-icon">{{ isEditing ? '📁' : '📁' }}</span>
+      <!-- header (both modes) -->
+      <div class="form-header">
+        <SvgIcon :name="isEditing ? 'edit' : 'group'" size="20" class="header-icon" />
         <h3>{{ isEditing ? '编辑业务分组' : '创建新分组' }}</h3>
       </div>
       
       <div class="form-scroll-area">
+        <div v-if="viewMode !== 'main'" class="group-form-hint">
+          分组可帮助你组织和管理多台主机，例如按环境、地域画分。
+        </div>
         <div class="form-grid">
           <div class="form-group animate-in" style="--delay: 0.1s">
             <label>分组名称</label>
@@ -1350,11 +1419,23 @@ body, html, #app {
   color: var(--text-main);
 }
 .footer-item.active {
-  background: var(--sidebar-hover);
+  background: rgba(var(--accent-rgb, 57,108,216), 0.08);
   color: var(--accent-color);
   font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--accent-color);
 }
 .footer-icon { font-size: 1rem; opacity: 0.8; }
+
+.group-form-hint {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  background: rgba(57,108,216,0.04);
+  border-left: 3px solid var(--accent-color);
+  border-radius: 0 6px 6px 0;
+  padding: 10px 14px;
+  margin-bottom: 4px;
+  line-height: 1.6;
+}
 .action-icon {
   width: 14px;
   height: 14px;
@@ -1512,7 +1593,7 @@ body, html, #app {
 .terminal-wrapper { 
   flex: 1; 
   position: relative; 
-  background: #000; 
+  background: var(--bg-main, #f5f7fa); 
   overflow: hidden; 
   display: flex;
 }
@@ -1522,6 +1603,10 @@ body, html, #app {
   position: relative;
   overflow: hidden;
   height: 100%;
+  pointer-events: none;
+}
+.main-terminal-area:has(.xterm) {
+  pointer-events: auto;
 }
 
 .session-container {
@@ -1573,20 +1658,53 @@ body, html, #app {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   background: radial-gradient(circle at center, hsl(210, 30%, 94%) 0%, var(--bg-dark) 100%);
 }
-.empty-hero { text-align: center; }
+.empty-hero { 
+  text-align: center; 
+  display: flex; 
+  flex-direction: column; 
+  align-items: center; 
+  gap: 10px;
+}
+.hero-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 12px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  background: linear-gradient(135deg, rgba(57,108,216,0.1), rgba(139,92,246,0.1));
+  border: 1px solid rgba(57,108,216,0.2);
+  color: var(--accent-color);
+  margin-bottom: 4px;
+}
 .empty-hero h1 { 
-  font-size: 3rem; margin-bottom: 8px; font-weight: 800; 
-  line-height: 1.3;
-  padding: 10px 0;
+  font-size: 3.6rem; margin-bottom: 0; font-weight: 800; 
+  line-height: 1.2;
   background: linear-gradient(135deg, var(--text-main) 0%, var(--accent-color) 100%); 
   -webkit-background-clip: text; 
   background-clip: text;
   -webkit-text-fill-color: transparent; 
 }
+.hero-slogan {
+  font-size: 1.1rem;
+  font-weight: 500;
+  color: var(--accent-color);
+  letter-spacing: 0.3px;
+  font-style: italic;
+  margin-top: -2px;
+}
+.hero-desc {
+  font-size: 13px;
+  color: var(--text-dim, #94a3b8);
+  line-height: 1.6;
+  max-width: 380px;
+}
 .hero-actions {
   display: flex;
   justify-content: center;
   gap: 16px;
+  margin-top: 6px;
 }
 .hero-actions button {
   background: var(--accent-color); color: white; border: none;
@@ -1600,6 +1718,16 @@ body, html, #app {
 }
 .hero-actions button:hover { background: var(--accent-hover); transform: translateY(-2px); box-shadow: 0 8px 20px rgba(57, 108, 216, 0.4); }
 .hero-actions .secondary-btn:hover { background: rgba(57, 108, 216, 0.15); color: var(--accent-hover); }
+.hero-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  font-size: 11.5px;
+  color: var(--text-dim, #94a3b8);
+}
+.hero-footer strong { color: var(--accent-color); }
+.hero-dot { opacity: 0.4; }
 
 /* Modal Styling */
 .modal-overlay {

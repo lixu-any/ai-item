@@ -130,9 +130,17 @@ function parseContent(text: string): Segment[] {
     <!-- Messages -->
     <div ref="messagesContainer" class="messages-area">
       <div v-if="messages.length === 0" class="empty-state">
-        <SvgIcon name="ai" size="40" class="empty-icon" />
+        <div class="empty-icon-wrap">
+          <SvgIcon name="ai" size="32" />
+        </div>
         <p class="empty-title">有什么我可以帮你的吗？</p>
-        <p class="empty-hint">例如：&ldquo;帮我写一个查找当前目录大文件的命令&rdquo;</p>
+        <p class="empty-hint">向 AI 发问，或点击下方示例快速开始：</p>
+        <div class="suggestion-chips">
+          <span class="chip" @click="query = '列出当前目录大于100MB的文件'">📄 查找大文件</span>
+          <span class="chip" @click="query = '显示CPU和内存使用率'">📊 系统状态</span>
+          <span class="chip" @click="query = '查看最近的系统日志错误'">🔍 查看日志</span>
+          <span class="chip" @click="query = '列出所有运行中的进程'">⚙️ 进程列表</span>
+        </div>
       </div>
 
       <div v-for="msg in messages" :key="msg.id" class="msg-row" :class="msg.role">
@@ -252,10 +260,44 @@ function parseContent(text: string): Segment[] {
   text-align: center;
   gap: 8px;
   color: var(--text-dim, #94a3b8);
+  padding: 0 16px;
+}
+.empty-icon-wrap {
+  width: 60px; height: 60px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(57,108,216,0.08), rgba(139,92,246,0.08));
+  border: 1px solid rgba(57,108,216,0.12);
+  display: flex; align-items: center; justify-content: center;
+  color: #3b82f6;
+  margin-bottom: 4px;
 }
 .empty-icon { opacity: 0.4; }
-.empty-title { font-size: 13px; }
-.empty-hint { font-size: 11.5px; line-height: 1.5; max-width: 80%; }
+.empty-title { font-size: 13px; font-weight: 600; color: #374151; }
+.empty-hint { font-size: 11.5px; line-height: 1.5; max-width: 90%; }
+
+.suggestion-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  margin-top: 4px;
+}
+.chip {
+  font-size: 11px;
+  padding: 5px 10px;
+  border-radius: 20px;
+  background: rgba(57,108,216,0.06);
+  border: 1px solid rgba(57,108,216,0.15);
+  color: #3b82f6;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.chip:hover {
+  background: rgba(57,108,216,0.12);
+  border-color: rgba(57,108,216,0.3);
+  transform: translateY(-1px);
+}
 
 /* Messages */
 .msg-row {

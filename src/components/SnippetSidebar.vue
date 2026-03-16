@@ -50,7 +50,7 @@ async function saveSnippet() {
 }
 
 async function deleteSnippet(id: number) {
-  const confirmed = await confirm('确定删除该命令片段吗？', { title: 'AI-Term-Shell', kind: 'warning' });
+  const confirmed = await confirm('确定删除该命令片段吗？', { title: 'Nixu', kind: 'warning' });
   if (!confirmed) return;
   try {
     await invoke('delete_snippet', { id });

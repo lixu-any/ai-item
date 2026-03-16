@@ -1,7 +1,6 @@
 use ssh2::{Session, ErrorCode};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -35,13 +34,31 @@ pub async fn open_ssh_session(
     private_key: Option<String>,
     cols: u32,
     rows: u32,
+    connect_timeout_secs: Option<u64>,
+    keepalive_secs: Option<u32>,
 ) -> Result<(), String> {
-    let tcp = TcpStream::connect(format!("{}:{}", host, port)).map_err(|e| e.to_string())?;
+    let timeout_secs = connect_timeout_secs.unwrap_or(15);
+    let addr = format!("{}:{}", host, port);
+
+    // 带超时的 TCP 连接
+    let tcp = std::net::TcpStream::connect_timeout(
+        &addr.parse::<std::net::SocketAddr>()
+             .map_err(|e| format!("解析地址失败：{}", e))?,
+        Duration::from_secs(timeout_secs),
+    ).map_err(|e| format!("连接超时或失败（{}s）：{}", timeout_secs, e))?;
+
     tcp.set_nonblocking(true).map_err(|e| e.to_string())?;
-    
+
     let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_tcp_stream(tcp);
     sess.set_blocking(false);
+
+    // 配置 Keepalive
+    if let Some(interval) = keepalive_secs {
+        if interval > 0 {
+            sess.set_keepalive(true, interval);
+        }
+    }
     
     // Handshake
     loop {

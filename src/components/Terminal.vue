@@ -55,6 +55,7 @@ let term: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 const searchAddon = ref<SearchAddon | null>(null);
 let unlisten: UnlistenFn | null = null;
+let unlistenSettings: UnlistenFn | null = null;
 let resizeObserver: ResizeObserver | null = null;
 
 const emit = defineEmits(['data', 'resize']);
@@ -71,21 +72,34 @@ const searchInputRef = ref<HTMLInputElement | null>(null);
 onMounted(async () => {
   if (!terminalContainer.value) return;
 
+  // 从数据库读取终端外观设置
+  const savedFontSize   = await invoke<string | null>('get_setting', { key: 'term_font_size'    }).catch(() => null);
+  const savedLineHeight = await invoke<string | null>('get_setting', { key: 'term_line_height'  }).catch(() => null);
+  const savedFontFamily = await invoke<string | null>('get_setting', { key: 'term_font_family'  }).catch(() => null);
+  const savedCursor     = await invoke<string | null>('get_setting', { key: 'term_cursor_style' }).catch(() => null);
+
+  const fontSize   = savedFontSize   ? parseInt(savedFontSize)     : 14;
+  const lineHeight = savedLineHeight ? parseFloat(savedLineHeight)  : 1.2;
+  const fontFamily = savedFontFamily || '"Cascadia Code", Menlo, Monaco, "Courier New", monospace';
+  const cursorStyle = (savedCursor as any) || 'block';
+
   term = new Terminal({
     cursorBlink: true,
-    fontSize: 14,
-    fontFamily: '"Cascadia Code", Menlo, Monaco, "Courier New", monospace',
+    cursorStyle,
+    fontSize,
+    lineHeight,
+    fontFamily,
     scrollback: 10000,
     theme: {
       background: '#0a0a0a',
       foreground: '#d4d4d4',
       cursor: '#396cd8',
-      selectionBackground: '#ffcc00', // 使用更醒目的金黄色作为当前搜索/选中背景
-      selectionForeground: '#000000', // 选中文字颜色为黑色
-      selectionInactiveBackground: '#ffcc00', // 即使失去焦点也保持高亮
+      selectionBackground: '#ffcc00',
+      selectionForeground: '#000000',
+      selectionInactiveBackground: '#ffcc00',
     },
     allowProposedApi: true,
-    convertEol: true, // 确保自动处理换行
+    convertEol: true,
   });
 
   fitAddon = new FitAddon();
@@ -149,12 +163,28 @@ onMounted(async () => {
     if (props.isActive) term?.focus();
   });
 
-  term.writeln('\x1b[1;32mAI-Term-Shell\x1b[0m 终端就绪...');
+  term.writeln('\x1b[1;32mNixu\x1b[0m 终端就绪...');
   if (props.sessionId) {
     setupSessionListener(props.sessionId);
   } else {
     term.writeln('正在等待会话启动...');
   }
+
+  // 监听设置变更，实时更新终端外观（无需重启）
+  unlistenSettings = await listen<{
+    fontSize: number;
+    lineHeight: number;
+    fontFamily: string;
+    cursorStyle: 'block' | 'underline' | 'bar';
+  }>('terminal-settings-changed', (event) => {
+    if (!term) return;
+    const { fontSize, lineHeight, fontFamily, cursorStyle } = event.payload;
+    term.options.fontSize    = fontSize;
+    term.options.lineHeight  = lineHeight;
+    term.options.fontFamily  = fontFamily;
+    term.options.cursorStyle = cursorStyle;
+    setTimeout(() => { try { fitAddon?.fit(); } catch(e){} }, 50);
+  });
 });
 
 async function setupSessionListener(id: string) {
@@ -269,6 +299,7 @@ async function sendDataToBackend(data: string) {
   }
 }
 
+
 function onSearch(isNext = false) {
   if (searchAddon.value && searchQuery.value) {
     if (isNext) {
@@ -297,6 +328,7 @@ watch(() => props.sessionId, (newId) => {
 onBeforeUnmount(() => {
   if (resizeObserver) resizeObserver.disconnect();
   if (unlisten) unlisten();
+  if (unlistenSettings) unlistenSettings();
   term?.dispose();
 });
 

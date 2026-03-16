@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { emit as tauriEmit } from '@tauri-apps/api/event';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import SvgIcon from './SvgIcon.vue';
 
@@ -22,6 +24,12 @@ const newCred = ref<Credential>({
   password: '',
   private_key: '',
   description: ''
+});
+
+// 判断是否为 picker 模式（从 add-host 窗口打开的凭据选择器）
+const isPicker = computed(() => {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('mode') === 'picker';
 });
 
 const emit = defineEmits(['close', 'select', 'toast']);
@@ -75,7 +83,7 @@ function editCredential(c: Credential) {
 }
 
 async function deleteCredential(id: number) {
-  const confirmed = await confirm('确定删除该凭据吗？', { title: 'AI-Term-Shell', kind: 'warning' });
+  const confirmed = await confirm('确定删除该凭据吗？', { title: 'Nixu', kind: 'warning' });
   if (!confirmed) return;
   try {
     await invoke('delete_credential', { id });
@@ -87,8 +95,14 @@ async function deleteCredential(id: number) {
   }
 }
 
-function handleSelect(c: Credential) {
-  emit('select', c);
+async function handleSelect(c: Credential) {
+  if (isPicker.value) {
+    // picker 模式：通过 Tauri 事件将凭据传回 add-host 窗口，然后关闭自身
+    await tauriEmit('credential-picked', c);
+    await getCurrentWebviewWindow().close();
+  } else {
+    emit('select', c);
+  }
 }
 
 onMounted(loadCredentials);

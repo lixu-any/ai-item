@@ -9,7 +9,8 @@
     "add-group",
     "edit-group-*",
     "settings",
-    "credentials"
+    "credentials",
+    "credentials-picker"
   ],
   "permissions": [
     "core:default",

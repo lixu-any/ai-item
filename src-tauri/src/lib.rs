@@ -45,8 +45,9 @@ pub fn run() {
                     println!("Backend: No saved size found or parse failed.");
                 }
                 
-                // 设置完尺寸后再显示窗口，避免闪烁
-                println!("Backend: Showing main window.");
+                // 设置完尺寸后居中显示，避免位置偏移
+                println!("Backend: Centering and showing main window.");
+                let _ = main_window.center();
                 let _ = main_window.show();
             } else {
                 println!("Backend: Main window not found by label 'main'!");

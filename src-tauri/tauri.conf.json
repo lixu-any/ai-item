@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AI-Term-Shell",
+  "productName": "Nixu",
   "version": "0.1.0",
   "identifier": "com.aiterm.shell",
   "build": {
@@ -13,9 +13,10 @@
     "windows": [
       {
         "label": "main",
-        "title": "AI-Term-Shell",
+        "title": "Nixu",
         "width": 1000,
         "height": 700,
+        "center": true,
         "visible": false
       }
     ],
