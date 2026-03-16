@@ -89,6 +89,7 @@ const searchQuery = ref('');
 const searchInputRef = ref<HTMLInputElement | null>(null);
 
 // ---- Auto Completion (智能提示) ----
+const autoCompletionEnabled = ref(true);
 const suggestions = ref<string[]>([]);
 const selectedCompIdx = ref(0);
 let currentInputStr = '';
@@ -104,6 +105,7 @@ const COMMON_CMDS = [
 ];
 
 async function fetchCompletions() {
+  if (!autoCompletionEnabled.value) { suggestions.value = []; return; }
   const q = currentInputStr.trim().toLowerCase();
   if (!q || !props.sessionId) { suggestions.value = []; return; }
   
@@ -188,11 +190,13 @@ onMounted(async () => {
   const savedLineHeight = await invoke<string | null>('get_setting', { key: 'term_line_height'  }).catch(() => null);
   const savedFontFamily = await invoke<string | null>('get_setting', { key: 'term_font_family'  }).catch(() => null);
   const savedCursor     = await invoke<string | null>('get_setting', { key: 'term_cursor_style' }).catch(() => null);
+  const savedAutoComp   = await invoke<string | null>('get_setting', { key: 'term_auto_completion'}).catch(() => null);
 
   const fontSize   = savedFontSize   ? parseInt(savedFontSize)     : 14;
   const lineHeight = savedLineHeight ? parseFloat(savedLineHeight)  : 1.2;
   const fontFamily = savedFontFamily || '"Cascadia Code", Menlo, Monaco, "Courier New", monospace';
   const cursorStyle = (savedCursor as any) || 'block';
+  autoCompletionEnabled.value = savedAutoComp !== 'false';
 
   term = new Terminal({
     cursorBlink: true,
@@ -332,13 +336,18 @@ onMounted(async () => {
     lineHeight: number;
     fontFamily: string;
     cursorStyle: 'block' | 'underline' | 'bar';
+    autoCompletion?: boolean;
   }>('terminal-settings-changed', (event) => {
     if (!term) return;
-    const { fontSize, lineHeight, fontFamily, cursorStyle } = event.payload;
+    const { fontSize, lineHeight, fontFamily, cursorStyle, autoCompletion } = event.payload;
     term.options.fontSize    = fontSize;
     term.options.lineHeight  = lineHeight;
     term.options.fontFamily  = fontFamily;
     term.options.cursorStyle = cursorStyle;
+    if (autoCompletion !== undefined) {
+      autoCompletionEnabled.value = autoCompletion;
+      if (!autoCompletion) suggestions.value = [];
+    }
     setTimeout(() => { try { fitAddon?.fit(); } catch(e){} }, 50);
   });
 });
@@ -631,15 +640,17 @@ defineExpose({
   background: rgba(30, 30, 46, 0.95);
   backdrop-filter: blur(12px);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  padding: 8px 16px;
+  padding: 10px 14px;
   border-radius: 12px;
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
   display: flex;
-  align-items: center;
-  gap: 16px;
+  flex-direction: column;
+  gap: 8px;
   z-index: 200;
   color: white;
   pointer-events: auto;
+  min-width: 320px;
+  max-width: 600px;
 }
 
 .ac-hint {
@@ -651,25 +662,32 @@ defineExpose({
   color: #6366f1;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  width: 100%;
 }
 
 .ac-list {
   display: flex;
-  gap: 8px;
-  border-left: 1px solid rgba(255, 255, 255, 0.1);
-  border-right: 1px solid rgba(255, 255, 255, 0.1);
-  padding: 0 16px;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
 }
 
 .ac-item {
-  padding: 4px 10px;
+  padding: 6px 10px;
   border-radius: 6px;
   font-family: 'JetBrains Mono', Consolas, monospace;
   font-size: 13px;
   color: #d1d5db;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
   border: 1px solid transparent;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .ac-item:hover {
@@ -689,6 +707,9 @@ defineExpose({
   display: flex;
   align-items: center;
   gap: 4px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  width: 100%;
 }
 
 .ac-shortcuts kbd {

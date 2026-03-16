@@ -31,6 +31,7 @@ const termLineHeight = ref(1.2);
 const termFontFamily = ref('"Cascadia Code", Menlo, Monaco, monospace');
 const termCursorStyle = ref<'block' | 'underline' | 'bar'>('block');
 const tabTitleMode = ref<'ip' | 'name'>('ip');
+const termAutoCompletion = ref(true);
 
 // ---- 系统字体 ----
 const systemFonts = ref<string[]>([]);
@@ -98,6 +99,9 @@ async function loadSettings() {
     const titleMode = await invoke<string | null>('get_setting', { key: 'tab_title_mode' });
     tabTitleMode.value = (titleMode as any) || 'ip';
 
+    const autoCompStr = await invoke<string | null>('get_setting', { key: 'term_auto_completion' });
+    termAutoCompletion.value = autoCompStr !== 'false'; // default true
+
     const timeout = await invoke<string | null>('get_setting', { key: 'ssh_connect_timeout' });
     sshTimeout.value = timeout ? parseInt(timeout) : 15;
 
@@ -119,6 +123,7 @@ async function saveSettings() {
     await invoke('save_setting', { key: 'term_font_family', value: termFontFamily.value });
     await invoke('save_setting', { key: 'term_cursor_style', value: termCursorStyle.value });
     await invoke('save_setting', { key: 'tab_title_mode', value: tabTitleMode.value });
+    await invoke('save_setting', { key: 'term_auto_completion', value: String(termAutoCompletion.value) });
     await invoke('save_setting', { key: 'ssh_connect_timeout', value: String(sshTimeout.value) });
     await invoke('save_setting', { key: 'ssh_keepalive', value: String(sshKeepalive.value) });
 
@@ -128,6 +133,7 @@ async function saveSettings() {
       lineHeight: termLineHeight.value,
       fontFamily: termFontFamily.value,
       cursorStyle: termCursorStyle.value,
+      autoCompletion: termAutoCompletion.value,
     });
 
     emit('toast', { message: '设置已保存', type: 'success' });
@@ -426,6 +432,29 @@ onMounted(() => {
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20"/></svg>
                   IP 地址
                   <span class="opt-example">root@152.x.x.x</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 智能提示 -->
+          <div class="section">
+            <div class="section-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+              智能提示
+            </div>
+            <div class="form-field">
+              <label>终端自动补全</label>
+              <div class="toggle-opts">
+                <button class="toggle-opt" :class="{ active: termAutoCompletion }" @click="termAutoCompletion = true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  开启
+                  <span class="opt-example">提供命令补全建议</span>
+                </button>
+                <button class="toggle-opt" :class="{ active: !termAutoCompletion }" @click="termAutoCompletion = false">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                  关闭
+                  <span class="opt-example">禁用补全浮层</span>
                 </button>
               </div>
             </div>
