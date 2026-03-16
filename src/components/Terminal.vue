@@ -138,7 +138,9 @@ onMounted(async () => {
           cols: size.cols,
           rows: size.rows
         });
-      } catch (err) {}
+      } catch (err) {
+        console.error("Backend resize failed:", err);
+      }
     }
     emit('resize', size);
   });
@@ -172,6 +174,23 @@ async function setupSessionListener(id: string) {
           term.write(new Uint8Array(event.payload));
         }
       });
+      
+      // 会话监听建立后，强制同步一次尺寸，确保后端知道真实的 cols/rows
+      setTimeout(() => {
+        if (fitAddon && term) {
+          try {
+            fitAddon.fit();
+            // 显式触发一次 resize 逻辑以同步后端
+            const size = { cols: term.cols, rows: term.rows };
+            const command = props.type === 'ssh' ? 'resize_ssh_session' : 'resize_pty_session';
+            invoke(command, {
+              sessionId: id,
+              cols: size.cols,
+              rows: size.rows
+            }).catch(e => console.error("Initial resize failed:", e));
+          } catch (e) {}
+        }
+      }, 100);
     } catch (err) {}
   }
 }
@@ -282,8 +301,8 @@ onBeforeUnmount(() => {
 });
 
 defineExpose({
-  write: (data: string | Uint8Array) => term?.write(data),
-  writeln: (data: string) => term?.writeln(data),
+  write: (data: string) => sendDataToBackend(data),
+  writeln: (data: string) => sendDataToBackend(data + '\n'),
   clear: () => term?.clear(),
   focus: () => term?.focus(),
 });

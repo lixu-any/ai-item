@@ -72,7 +72,14 @@ pub fn run() {
             pty::open_pty_session,
             pty::write_to_pty,
             pty::resize_pty_session,
-            pty::close_pty_session
+            pty::close_pty_session,
+            db::add_snippet,
+            db::get_snippets,
+            db::delete_snippet,
+            db::add_credential,
+            db::get_credentials,
+            db::delete_credential,
+            db::update_credential
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

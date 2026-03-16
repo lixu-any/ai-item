@@ -7,6 +7,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import Terminal from "./components/Terminal.vue";
 import ContextMenu, { MenuItem } from "./components/ContextMenu.vue";
 import SpotlightSearch from "./components/SpotlightSearch.vue";
+import SnippetSidebar from "./components/SnippetSidebar.vue";
+import CredentialManager from "./components/CredentialManager.vue";
+import SvgIcon from "./components/SvgIcon.vue";
 
 interface SessionTab {
   id: string;
@@ -54,6 +57,38 @@ const toasts = ref<{id: number, message: string, type: 'success' | 'error'}[]>([
 let toastIdCounter = 0;
 
 const showSpotlight = ref(false);
+const showSnippetSidebar = ref(false);
+const showCredentialManager = ref(false);
+const terminalRefs = ref<Record<string, any>>({});
+
+function setTerminalRef(id: string, el: any) {
+  if (el) terminalRefs.value[id] = el;
+  else delete terminalRefs.value[id];
+}
+
+function handleRunSnippet(command: string) {
+  if (activeSessionId.value && terminalRefs.value[activeSessionId.value]) {
+    terminalRefs.value[activeSessionId.value].write(command + '\n');
+    showToast('已发送命令片段');
+  } else {
+    showToast('没有活动的终端窗口', 'error');
+  }
+}
+
+function handleSelectCredential(c: any) {
+  newHost.value.username = c.username;
+  if (c.password) {
+    newHost.value.password = c.password;
+    authType.value = 'password';
+  }
+  if (c.private_key) {
+    newHost.value.private_key = c.private_key;
+    authType.value = 'private_key';
+    pkType.value = c.private_key.includes('BEGIN') ? 'content' : 'path';
+  }
+  showCredentialManager.value = false;
+  showToast(`已应用凭据: ${c.name}`);
+}
 
 const viewMode = ref<'main' | 'add-host' | 'edit-host' | 'add-group' | 'edit-group'>('main');
 const hostId = ref<number | null>(null);
@@ -449,14 +484,15 @@ async function connectToHost(host: Host) {
   try {
     console.log("正在调用 open_ssh_session...");
     await invoke("open_ssh_session", {
-      sessionId: sessionId, // Use sessionId consistently
+      sessionId: sessionId,
       host: host.host,
       port: host.port,
       username: host.username,
       password: host.password || null,
-      privateKey: host.private_key || null
+      privateKey: host.private_key || null,
+      cols: 80,
+      rows: 24
     });
-    console.log("连接成功, sessionId:", sessionId);
     showToast(`成功连接到 ${host.name}`);
   } catch (err) {
     console.error("连接异常:", err);
@@ -641,10 +677,10 @@ async function saveWindowSize() {
         <span class="sidebar-title">主机列表</span>
         <div class="header-actions">
           <button class="add-btn primary" @click="openAddGroupModal" title="添加分组">
-            <span>📁</span>
+            <SvgIcon name="group" size="14" />
           </button>
-          <button class="add-btn primary" @click="openAddModal" title="添加主机">
-            <span>+</span>
+          <button class="add-btn accent" @click="openAddModal" title="添加主机">
+            <SvgIcon name="add" size="14" />
           </button>
         </div>
       </div>
@@ -668,11 +704,15 @@ async function saveWindowSize() {
         >
           <div class="group-header" @click="toggleGroup(g.id!)">
             <span class="chevron">›</span>
-            <span class="folder-icon">📂</span>
+            <SvgIcon name="group" size="16" class="folder-icon" />
             <span class="group-name">{{ g.name }}</span>
             <div class="group-actions">
-              <button class="icon-btn" @click.stop="editGroup(g)" title="编辑分组">✎</button>
-              <button class="icon-btn delete-btn" @click.stop="deleteGroup(g.id!)" title="删除分组">✗</button>
+              <button class="icon-btn" @click.stop="editGroup(g)" title="编辑分组">
+                <SvgIcon name="edit" size="14" />
+              </button>
+              <button class="icon-btn delete-btn" @click.stop="deleteGroup(g.id!)" title="删除分组">
+                <SvgIcon name="delete" size="14" />
+              </button>
             </div>
           </div>
           <div class="group-content" v-show="!isGroupCollapsed(g.id!) || searchQuery">
@@ -692,9 +732,15 @@ async function saveWindowSize() {
                 <span class="host-ip">{{ h.username }}@{{ h.host }}</span>
               </div>
               <div class="host-actions">
-                 <button class="icon-btn" @click.stop="connectToHost(h)" title="连接">▶</button>
-                 <button class="icon-btn" @click.stop="editHost(h)" title="编辑">✎</button>
-                 <button class="icon-btn delete-btn" @click.stop="deleteHost(h.id!)" title="删除">✗</button>
+                 <button class="icon-btn" @click.stop="connectToHost(h)" title="连接">
+                   <SvgIcon name="play" size="14" />
+                 </button>
+                 <button class="icon-btn" @click.stop="editHost(h)" title="编辑">
+                   <SvgIcon name="edit" size="14" />
+                 </button>
+                 <button class="icon-btn delete-btn" @click.stop="deleteHost(h.id!)" title="删除">
+                   <SvgIcon name="delete" size="14" />
+                 </button>
               </div>
             </div>
           </div>
@@ -728,34 +774,48 @@ async function saveWindowSize() {
                 <span class="host-ip">{{ h.username }}@{{ h.host }}</span>
               </div>
               <div class="host-actions">
-                 <button class="icon-btn" @click.stop="connectToHost(h)" title="连接">▶</button>
-                 <button class="icon-btn" @click.stop="editHost(h)" title="编辑">✎</button>
-                 <button class="icon-btn delete-btn" @click.stop="deleteHost(h.id!)" title="删除">✗</button>
+                 <button class="icon-btn" @click.stop="connectToHost(h)" title="连接">
+                   <SvgIcon name="play" size="14" />
+                 </button>
+                 <button class="icon-btn" @click.stop="editHost(h)" title="编辑">
+                   <SvgIcon name="edit" size="14" />
+                 </button>
+                 <button class="icon-btn delete-btn" @click.stop="deleteHost(h.id!)" title="删除">
+                   <SvgIcon name="delete" size="14" />
+                 </button>
               </div>
             </div>
           </div>
         </div>
 
         <div v-if="filteredHosts().length === 0 && searchQuery" class="empty-state">
-          <span class="empty-icon">🔍</span>
+          <SvgIcon name="search" size="48" class="empty-icon" />
           <p>没有找到匹配的主机</p>
         </div>
         <div v-else-if="savedHosts.length === 0" class="empty-state">
-          <span class="empty-icon">🚀</span>
+          <SvgIcon name="host" size="48" class="empty-icon" />
           <p>点击上方 + 开始添加第一台服务器</p>
         </div>
       </div>
       <div class="sidebar-footer">
         <div class="footer-item" @click="newLocalTerminal" title="本地终端">
-          <span class="footer-icon">💻</span>
+          <SvgIcon name="host" size="18" class="footer-icon" />
           <span>本地终端</span>
         </div>
+        <div class="footer-item" @click="showSnippetSidebar = !showSnippetSidebar" :class="{ active: showSnippetSidebar }" title="命令片段">
+          <SvgIcon name="snippet" size="18" class="footer-icon" />
+          <span>命令片段</span>
+        </div>
         <div class="footer-item" title="AI 助手">
-          <span class="footer-icon">✨</span>
+          <SvgIcon name="ai" size="18" class="footer-icon" />
           <span>AI 助手</span>
         </div>
+        <div class="footer-item" title="凭据管理" @click="showCredentialManager = true">
+          <SvgIcon name="credential" size="18" class="footer-icon" />
+          <span>凭据中心</span>
+        </div>
         <div class="footer-item" title="设置">
-          <span class="footer-icon">⚙️</span>
+          <SvgIcon name="settings" size="18" class="footer-icon" />
           <span>设置</span>
         </div>
       </div>
@@ -776,7 +836,7 @@ async function saveWindowSize() {
         >
           <span>{{ session.title }}</span>
           <div class="tab-actions">
-            <span class="close-icon" @click.stop="closeSession(session.id)">×</span>
+            <SvgIcon name="close" size="12" class="close-icon" @click.stop="closeSession(session.id)" />
           </div>
         </div>
       </header>
@@ -800,6 +860,7 @@ async function saveWindowSize() {
             v-for="session in sessions" 
             :key="session.id"
             v-show="activeSessionId === session.id"
+            :ref="(el) => setTerminalRef(session.id, el)"
             :session-id="session.id" 
             :is-active="activeSessionId === session.id"
             :type="session.type"
@@ -807,6 +868,7 @@ async function saveWindowSize() {
         </div>
       </div>
     </main>
+    <SnippetSidebar v-if="showSnippetSidebar" @run-snippet="handleRunSnippet" @close="showSnippetSidebar = false" />
   </div>
 
   <!-- Standalone Form / Modal -->
@@ -816,10 +878,11 @@ async function saveWindowSize() {
     <!-- Host Form -->
     <div v-if="viewMode === 'add-host' || viewMode === 'edit-host' || showAddModal" 
       class="modal-content" :class="{ 'premium-modal': isEditing, 'standalone-window': viewMode !== 'main' }">
-      <div v-if="viewMode === 'main'" class="modal-header-accent"></div>
-      <div v-if="viewMode === 'main'" class="form-header">
-        <span class="header-icon">{{ isEditing ? '📝' : '✨' }}</span>
+      <div class="modal-header-accent"></div>
+      <div class="form-header">
+        <SvgIcon :name="isEditing ? 'edit' : 'add'" size="20" class="header-icon" />
         <h3>{{ isEditing ? '编辑主机配置' : '添加新主机' }}</h3>
+        <button class="use-cred-btn" @click="showCredentialManager = true">复用凭据</button>
       </div>
       
       <div class="form-scroll-area">
@@ -969,6 +1032,13 @@ async function saveWindowSize() {
     :y="menuY"
     :items="tabMenuItems"
     @action="handleTabMenuAction"
+  />
+
+  <CredentialManager 
+    v-if="showCredentialManager" 
+    @close="showCredentialManager = false"
+    @select="handleSelectCredential"
+    @toast="(t) => showToast(t.message, t.type)"
   />
 </template>
 
@@ -1218,6 +1288,11 @@ body, html, #app {
 .footer-item:hover {
   background: var(--sidebar-hover);
   color: var(--text-main);
+}
+.footer-item.active {
+  background: var(--sidebar-hover);
+  color: var(--accent-color);
+  font-weight: 600;
 }
 .footer-icon { font-size: 1rem; opacity: 0.8; }
 .action-icon {
@@ -1593,6 +1668,20 @@ body, html, #app {
 }
 .win-close-btn:hover { opacity: 1; color: var(--danger); transform: scale(1.1); }
 .header-icon { font-size: 1.2rem; filter: grayscale(0.5); }
+
+.use-cred-btn {
+  margin-left: auto;
+  margin-right: 32px;
+  background: var(--glass-bg);
+  border: 1px solid var(--border-color);
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  color: var(--accent-color);
+  cursor: pointer;
+}
+.use-cred-btn:hover { background: var(--sidebar-hover); }
+
 .standalone-window h3 {
   border: none; margin: 0; padding: 0;
   font-size: 1rem; font-weight: 700;

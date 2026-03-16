@@ -33,6 +33,8 @@ pub async fn open_ssh_session(
     username: String,
     password: Option<String>,
     private_key: Option<String>,
+    cols: u32,
+    rows: u32,
 ) -> Result<(), String> {
     let tcp = TcpStream::connect(format!("{}:{}", host, port)).map_err(|e| e.to_string())?;
     tcp.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -103,7 +105,7 @@ pub async fn open_ssh_session(
 
     // Request PTY
     loop {
-        match channel.request_pty("xterm", None, None) {
+        match channel.request_pty("xterm-256color", None, Some((cols, rows, 0, 0))) {
             Ok(_) => break,
             Err(e) if e.code() == ErrorCode::Session(EAGAIN) => {
                 thread::sleep(Duration::from_millis(50));

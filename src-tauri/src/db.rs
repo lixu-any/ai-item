@@ -22,6 +22,24 @@ pub struct Group {
     pub parent_id: Option<i32>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Snippet {
+    pub id: Option<i32>,
+    pub name: String,
+    pub command: String,
+    pub group: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Credential {
+    pub id: Option<i32>,
+    pub name: String,
+    pub username: String,
+    pub password: Option<String>,
+    pub private_key: Option<String>,
+    pub description: Option<String>,
+}
+
 const DB_NAME: &str = "aiterm.db";
 
 fn get_conn(app_handle: &AppHandle) -> Result<Connection, String> {
@@ -80,6 +98,30 @@ pub fn init_db(app_handle: &AppHandle) -> Result<(), String> {
         "CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        )",
+        [],
+    ).map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS snippets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            command TEXT NOT NULL,
+            category TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+        [],
+    ).map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS credentials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            username TEXT NOT NULL,
+            password TEXT,
+            private_key TEXT,
+            description TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
         [],
     ).map_err(|e| e.to_string())?;
@@ -244,3 +286,106 @@ pub fn get_setting_internal(app_handle: &AppHandle, key: &str) -> Result<Option<
     let value = stmt.query_row([key], |row| row.get(0)).ok();
     Ok(value)
 }
+
+// Snippet commands
+#[tauri::command]
+pub async fn add_snippet(app_handle: AppHandle, name: String, command: String, category: Option<String>) -> Result<i32, String> {
+    let conn = get_conn(&app_handle)?;
+    conn.execute(
+        "INSERT INTO snippets (name, command, category) VALUES (?1, ?2, ?3)",
+        (&name, &command, &category),
+    ).map_err(|e| e.to_string())?;
+    Ok(conn.last_insert_rowid() as i32)
+}
+
+#[tauri::command]
+pub async fn get_snippets(app_handle: AppHandle) -> Result<Vec<Snippet>, String> {
+    let conn = get_conn(&app_handle)?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, command, category FROM snippets")
+        .map_err(|e| e.to_string())?;
+    let snippet_iter = stmt
+        .query_map([], |row| {
+            Ok(Snippet {
+                id: Some(row.get(0)?),
+                name: row.get(1)?,
+                command: row.get(2)?,
+                group: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut snippets = Vec::new();
+    for s in snippet_iter {
+        snippets.push(s.map_err(|e| e.to_string())?);
+    }
+    Ok(snippets)
+}
+
+#[tauri::command]
+pub async fn delete_snippet(app_handle: AppHandle, id: i32) -> Result<(), String> {
+    let conn = get_conn(&app_handle)?;
+    conn.execute("DELETE FROM snippets WHERE id = ?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// Credential commands
+#[tauri::command]
+pub async fn add_credential(app_handle: AppHandle, cred: Credential) -> Result<i32, String> {
+    let conn = get_conn(&app_handle)?;
+    conn.execute(
+        "INSERT INTO credentials (name, username, password, private_key, description) VALUES (?1, ?2, ?3, ?4, ?5)",
+        (&cred.name, &cred.username, &cred.password, &cred.private_key, &cred.description),
+    ).map_err(|e| e.to_string())?;
+    Ok(conn.last_insert_rowid() as i32)
+}
+
+#[tauri::command]
+pub async fn get_credentials(app_handle: AppHandle) -> Result<Vec<Credential>, String> {
+    let conn = get_conn(&app_handle)?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, username, password, private_key, description FROM credentials")
+        .map_err(|e| e.to_string())?;
+    let cred_iter = stmt
+        .query_map([], |row| {
+            Ok(Credential {
+                id: Some(row.get(0)?),
+                name: row.get(1)?,
+                username: row.get(2)?,
+                password: row.get(3)?,
+                private_key: row.get(4)?,
+                description: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut credentials = Vec::new();
+    for c in cred_iter {
+        credentials.push(c.map_err(|e| e.to_string())?);
+    }
+    Ok(credentials)
+}
+
+#[tauri::command]
+pub async fn delete_credential(app_handle: AppHandle, id: i32) -> Result<(), String> {
+    let conn = get_conn(&app_handle)?;
+    conn.execute("DELETE FROM credentials WHERE id = ?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn update_credential(app_handle: AppHandle, cred: Credential) -> Result<(), String> {
+    let conn = get_conn(&app_handle)?;
+    if let Some(id) = cred.id {
+        conn.execute(
+            "UPDATE credentials SET name=?1, username=?2, password=?3, private_key=?4, description=?5 WHERE id=?6",
+            (&cred.name, &cred.username, &cred.password, &cred.private_key, &cred.description, id),
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        Err("Credential ID missing".to_string())
+    }
+}
+

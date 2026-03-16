@@ -41,6 +41,13 @@
     "core:window:allow-inner-size",
     "core:webview:allow-create-webview-window",
     "core:event:allow-emit",
-    "core:event:allow-listen"
+    "core:event:allow-listen",
+    "allow-get-snippets",
+    "allow-add-snippet",
+    "allow-delete-snippet",
+    "allow-get-credentials",
+    "allow-add-credential",
+    "allow-delete-credential",
+    "allow-update-credential"
   ]
 }
