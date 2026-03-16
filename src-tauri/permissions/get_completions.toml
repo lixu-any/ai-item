@@ -1,0 +1,6 @@
+[[permission]]
+identifier = "allow-get-completions"
+description = "Enables the get_completions command."
+commands.allow = [
+    "get_completions",
+]

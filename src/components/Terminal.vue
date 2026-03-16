@@ -21,6 +21,23 @@
       </div>
     </div>
 
+    <div v-if="suggestions.length > 0" class="autocomplete-bar animate-pop">
+      <div class="ac-hint">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+        智能建议
+      </div>
+      <div class="ac-list">
+        <span 
+          v-for="(item, idx) in suggestions" 
+          :key="idx" 
+          class="ac-item" 
+          :class="{ active: idx === selectedCompIdx }"
+          @click="acceptCompletion(idx)"
+        >{{ item }}</span>
+      </div>
+      <div class="ac-shortcuts">按 <kbd>Tab</kbd> 或 <kbd>→</kbd> 补全 · <kbd>↑</kbd><kbd>↓</kbd> 切换 · <kbd>Esc</kbd> 关闭</div>
+    </div>
+
     <ContextMenu
       v-model:visible="showMenu"
       :x="menuX"
@@ -70,6 +87,56 @@ const menuItems = ref<MenuItem[]>([]);
 const showSearchBar = ref(false);
 const searchQuery = ref('');
 const searchInputRef = ref<HTMLInputElement | null>(null);
+
+// ---- Auto Completion (智能提示) ----
+const suggestions = ref<string[]>([]);
+const selectedCompIdx = ref(0);
+let currentInputStr = '';
+let compTimeout: any = null;
+
+// Mock list of common commands for basic completion
+const COMMON_CMDS = [
+  'ls -la', 'cd ..', 'pwd', 'clear', 'exit', 'history',
+  'git status', 'git add -A', 'git commit -m ""', 'git pull', 'git push',
+  'docker ps', 'docker-compose up -d', 'docker images',
+  'npm install', 'npm run dev', 'npm run build', 'yarn dev', 
+  'htop', 'tail -f', 'systemctl status', 'systemctl restart'
+];
+
+async function fetchCompletions() {
+  const q = currentInputStr.trim().toLowerCase();
+  if (!q || !props.sessionId) { suggestions.value = []; return; }
+  
+  try {
+    const backendSuggestions = await invoke<string[]>('get_completions', {
+      sessionId: props.sessionId,
+      currentInput: currentInputStr,
+    });
+    
+    // Fallback/append 简单的常用命令
+    const matches = COMMON_CMDS.filter(c => c.startsWith(q) && c !== q);
+    
+    const combined = [...new Set([...backendSuggestions, ...matches])];
+    suggestions.value = combined.slice(0, 5); // display up to 5
+    selectedCompIdx.value = 0;
+  } catch (err) {
+    console.error('Failed to fetch completions', err);
+    suggestions.value = [];
+  }
+}
+
+function acceptCompletion(idx: number) {
+  if (!suggestions.value[idx] || !term) return;
+  const item = suggestions.value[idx];
+  // Calculate what's missing
+  const remainder = item.substring(currentInputStr.length);
+  if (remainder) {
+    sendDataToBackend(remainder);
+  }
+  currentInputStr = item; // update tracker
+  suggestions.value = [];
+}
+
 
 // ---- Session 录制 ----
 const isRecording = ref(false);
@@ -182,9 +249,54 @@ onMounted(async () => {
   });
   resizeObserver.observe(terminalContainer.value!.parentElement!); // 观察包含内边距的容器
 
+  // 拦截特定的前端按键，处理自动补全下拉框逻辑
+  term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+    if (suggestions.value.length > 0 && e.type === 'keydown') {
+      if (e.key === 'Tab' || e.key === 'ArrowRight') {
+        acceptCompletion(selectedCompIdx.value);
+        e.preventDefault();
+        return false;
+      } else if (e.key === 'ArrowDown') {
+        selectedCompIdx.value = (selectedCompIdx.value + 1) % suggestions.value.length;
+        e.preventDefault();
+        return false;
+      } else if (e.key === 'ArrowUp') {
+        selectedCompIdx.value = (selectedCompIdx.value - 1 + suggestions.value.length) % suggestions.value.length;
+        e.preventDefault();
+        return false;
+      } else if (e.key === 'Escape') {
+        suggestions.value = [];
+        e.preventDefault();
+        return false;
+      }
+    }
+    return true;
+  });
+
   // 处理输入
   term.onData(async (data) => {
+    // 粗略跟踪输入，如果不精确，可后续改进
+    if (data === '\r' || data === '\n' || data === '\x03' /* Ctrl+C */) {
+      currentInputStr = '';
+      suggestions.value = [];
+    } else if (data === '\x7f' || data === '\b') {
+      currentInputStr = currentInputStr.slice(0, -1);
+    } else if (!data.includes('\x1b') && data.length === 1) { // 忽略转义序列
+      currentInputStr += data;
+    } else if (data.length > 1 && !data.includes('\x1b')) {
+      // 处理粘贴等多字符
+      currentInputStr += data;
+    }
+
     sendDataToBackend(data);
+
+    // 防抖请求匹配
+    if (currentInputStr.length >= 2) {
+      if (compTimeout) clearTimeout(compTimeout);
+      compTimeout = setTimeout(() => fetchCompletions(), 250);
+    } else {
+      suggestions.value = [];
+    }
   });
 
   term.onResize(async (size) => {
@@ -508,5 +620,84 @@ defineExpose({
 
 :deep(.xterm-viewport::-webkit-scrollbar-thumb:hover) {
   background-color: rgba(255, 255, 255, 0.3) !important;
+}
+
+/* ===== 自动补全浮层 ===== */
+.autocomplete-bar {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(30, 30, 46, 0.95);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 8px 16px;
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  z-index: 200;
+  color: white;
+  pointer-events: auto;
+}
+
+.ac-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #6366f1;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ac-list {
+  display: flex;
+  gap: 8px;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 0 16px;
+}
+
+.ac-item {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 13px;
+  color: #d1d5db;
+  cursor: pointer;
+  transition: all 0.15s;
+  border: 1px solid transparent;
+}
+
+.ac-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.ac-item.active {
+  background: rgba(99, 102, 241, 0.2);
+  color: #fff;
+  border-color: rgba(99, 102, 241, 0.5);
+  font-weight: 600;
+}
+
+.ac-shortcuts {
+  font-size: 11px;
+  color: #9ca3af;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ac-shortcuts kbd {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-family: inherit;
+  font-size: 10px;
+  color: #e5e7eb;
 }
 </style>

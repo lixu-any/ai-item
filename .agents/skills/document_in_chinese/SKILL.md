@@ -9,9 +9,9 @@ Whenever you are asked to create, update, or output any documentation, artifacts
 Do not use English for explanations in these documents, unless it is a specific technical term, variable name, or code snippet that necessitates English.
 
 This applies to:
-- `implementation_plan.md`
-- `task.md`
-- `walkthrough.md`
+- `implementation_plan.md` (Implementation Plans)
+- `task.md` (Task Checklists)
+- `walkthrough.md` (Walkthroughs)
 - Any file in the `docs/` directory
 - Any `.md` files you create in the workspace.
 

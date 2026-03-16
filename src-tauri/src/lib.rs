@@ -11,6 +11,7 @@ mod ssh;
 mod pty;
 mod ai;
 mod fonts;
+mod completions;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -92,6 +93,7 @@ pub fn run() {
             db::get_recents,
             fonts::get_system_fonts,
             ssh::get_host_stats,
+            completions::get_completions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

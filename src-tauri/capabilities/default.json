@@ -62,6 +62,7 @@
     "allow-get-system-fonts",
     "allow-record-recent",
     "allow-get-recents",
-    "allow-get-host-stats"
+    "allow-get-host-stats",
+    "allow-get-completions"
   ]
 }
