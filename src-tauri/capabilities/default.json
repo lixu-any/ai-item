@@ -53,6 +53,15 @@
     "allow-add-credential",
     "allow-delete-credential",
     "allow-update-credential",
-    "allow-ask-ai"
+    "allow-ask-ai",
+    "allow-export-data",
+    "allow-import-data",
+    "fs:default",
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    "allow-get-system-fonts",
+    "allow-record-recent",
+    "allow-get-recents",
+    "allow-get-host-stats"
   ]
 }

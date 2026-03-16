@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-record-recent"
+description = "Enables the record_recent command."
+commands.allow = ["record_recent"]
+
+[[permission]]
+identifier = "allow-get-recents"
+description = "Enables the get_recents command."
+commands.allow = ["get_recents"]

@@ -41,6 +41,8 @@ import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { save } from '@tauri-apps/plugin-dialog';
+import { writeTextFile } from '@tauri-apps/plugin-fs';
 import ContextMenu, { MenuItem } from './ContextMenu.vue';
 import '@xterm/xterm/css/xterm.css';
 
@@ -68,6 +70,48 @@ const menuItems = ref<MenuItem[]>([]);
 const showSearchBar = ref(false);
 const searchQuery = ref('');
 const searchInputRef = ref<HTMLInputElement | null>(null);
+
+// ---- Session 录制 ----
+const isRecording = ref(false);
+let recordStartTime = 0;
+let recordBuffer: [number, string][] = []; // [elapsed_sec, text]
+
+function startRecording() {
+  recordBuffer = [];
+  recordStartTime = Date.now();
+  isRecording.value = true;
+}
+
+async function stopRecording(title?: string) {
+  if (!isRecording.value) return;
+  isRecording.value = false;
+  // 生成 asciicast v2 格式
+  const header = JSON.stringify({
+    version: 2,
+    width: term?.cols ?? 80,
+    height: term?.rows ?? 24,
+    timestamp: Math.floor(recordStartTime / 1000),
+    title: title ?? 'Nixu Recording',
+  });
+  const events = recordBuffer.map(([t, d]) =>
+    JSON.stringify([t, 'o', d])
+  ).join('\n');
+  const castContent = header + '\n' + events;
+
+  try {
+    const filePath = await save({
+      title: '保存录制文件',
+      defaultPath: `nixu-recording-${Date.now()}.cast`,
+      filters: [{ name: 'asciicast', extensions: ['cast'] }],
+    });
+    if (filePath) {
+      await writeTextFile(filePath, castContent);
+    }
+  } catch (err) {
+    console.error('Save recording failed:', err);
+  }
+  recordBuffer = [];
+}
 
 onMounted(async () => {
   if (!terminalContainer.value) return;
@@ -201,7 +245,14 @@ async function setupSessionListener(id: string) {
     try {
       unlisten = await listen<number[]>(`sse-data-${id}`, (event) => {
         if (term) {
-          term.write(new Uint8Array(event.payload));
+          const u8 = new Uint8Array(event.payload);
+          term.write(u8);
+          // 录制拦截
+          if (isRecording.value) {
+            const elapsed = (Date.now() - recordStartTime) / 1000;
+            const text = new TextDecoder().decode(u8);
+            recordBuffer.push([parseFloat(elapsed.toFixed(6)), text]);
+          }
         }
       });
       
@@ -337,6 +388,9 @@ defineExpose({
   writeln: (data: string) => sendDataToBackend(data + '\n'),
   clear: () => term?.clear(),
   focus: () => term?.focus(),
+  startRecording,
+  stopRecording,
+  isRecording,
 });
 </script>
 

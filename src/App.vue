@@ -12,13 +12,15 @@ import CredentialManager from "./components/CredentialManager.vue";
 import SvgIcon from "./components/SvgIcon.vue";
 import SettingsModal from "./components/SettingsModal.vue";
 import AiSidebar from "./components/AiSidebar.vue";
+import SessionPlayer from "./components/SessionPlayer.vue";
 
 interface SessionTab {
   id: string;
   title: string;
-  type: 'ssh' | 'local';
+  type: 'ssh' | 'local' | 'player';
   host?: Host;
   connected?: boolean;
+  filePath?: string;
 }
 
 interface Group {
@@ -55,6 +57,14 @@ const pkType = ref<'path' | 'content'>('path');
 const searchQuery = ref("");
 const collapsedGroups = ref<number[]>([]);
 const collapsedUnGrouped = ref(false);
+const recentHosts = ref<Host[]>([]);
+
+async function loadRecents() {
+  try {
+    recentHosts.value = await invoke<Host[]>('get_recents');
+  } catch { /* 静默失败 */ }
+}
+
 const toasts = ref<{id: number, message: string, type: 'success' | 'error'}[]>([]);
 let toastIdCounter = 0;
 
@@ -64,17 +74,145 @@ const showAiSidebar = ref(false);
 const showCredentialManager = ref(false);
 const terminalRefs = ref<Record<string, any>>({});
 
+// ---- 广播模式 ----
+const broadcastMode = ref(false);
+const broadcastInput = ref('');
+const broadcastSelected = ref<Set<string>>(new Set()); // 空=全部
+
+function toggleBroadcast() {
+  broadcastMode.value = !broadcastMode.value;
+  if (!broadcastMode.value) broadcastInput.value = '';
+}
+
+async function sendBroadcast() {
+  const cmd = broadcastInput.value;
+  if (!cmd) return;
+  const data = new TextEncoder().encode(cmd + '\r');
+  const targets = broadcastSelected.value.size > 0
+    ? sessions.value.filter(s => broadcastSelected.value.has(s.id))
+    : sessions.value;
+  for (const s of targets) {
+    try {
+      if (s.type === 'ssh') {
+        await invoke('write_to_ssh', { sessionId: s.id, data: Array.from(data) });
+      } else {
+        await invoke('write_to_pty', { sessionId: s.id, data: Array.from(data) });
+      }
+    } catch { /* 静默忽略单个失败 */ }
+  }
+  broadcastInput.value = '';
+}
+
+
 function setTerminalRef(id: string, el: any) {
   if (el) terminalRefs.value[id] = el;
   else delete terminalRefs.value[id];
 }
 
+// ---- Session 录制 ----
+const recordingSessionId = ref<string | null>(null);
+
+async function toggleRecording(sessionId: string, sessionTitle: string) {
+  const termRef = terminalRefs.value[sessionId];
+  if (!termRef) return;
+  if (recordingSessionId.value === sessionId) {
+    await termRef.stopRecording(sessionTitle);
+    recordingSessionId.value = null;
+  } else {
+    recordingSessionId.value = sessionId;
+    termRef.startRecording();
+  }
+}
+
+// ---- 主机监控快照 ----
+const showMonitor = ref(false);
+const monitorLoading = ref(false);
+const monitorHost = ref<Host | null>(null);
+interface MonitorStats {
+  os: string; hostname: string; uptimeRaw: string; load1: number;
+  cpuUsed: number;
+  memTotal: number; memUsed: number; memPct: number;
+  diskTotal: number; diskUsed: number; diskPct: number;
+}
+const monitorStats = ref<MonitorStats | null>(null);
+let monitorSession: any = null;
+
+function parseKV(raw: string): Record<string, string> {
+  const kv: Record<string, string> = {};
+  for (const line of raw.split('\n')) {
+    const idx = line.indexOf('=');
+    if (idx > 0) kv[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+  }
+  return kv;
+}
+
+async function openMonitor(session: any) {
+  if (!session?.host) return;
+  monitorSession = session;
+  showMonitor.value = true;
+  monitorLoading.value = true;
+  monitorHost.value = session.host;
+  monitorStats.value = null;
+  try {
+    const raw = await invoke<string>('get_host_stats', {
+      host: session.host.host, port: session.host.port,
+      username: session.host.username,
+      password: session.host.password || null,
+      privateKey: session.host.private_key || null,
+    });
+    const kv = parseKV(raw);
+    const num = (k: string) => parseFloat(kv[k] || '0') || 0;
+    const memTotal = num('MEM_TOTAL'), memUsed = num('MEM_USED');
+    const diskTotal = num('DISK_TOTAL'), diskUsed = num('DISK_USED');
+    monitorStats.value = {
+      os: kv['OS'] || 'N/A',
+      hostname: kv['HOSTNAME'] || session.host.host,
+      uptimeRaw: kv['UPTIME_RAW'] || '',
+      load1: num('LOAD1'),
+      cpuUsed: num('CPU_USED'),
+      memTotal, memUsed,
+      memPct: memTotal > 0 ? Math.round(memUsed / memTotal * 100) : 0,
+      diskTotal, diskUsed,
+      diskPct: num('DISK_PCT'),
+    };
+  } catch (e: any) {
+    monitorStats.value = { os: `获取失败: ${e}`, hostname: '', uptimeRaw: '', load1: 0, cpuUsed: 0, memTotal: 0, memUsed: 0, memPct: 0, diskTotal: 0, diskUsed: 0, diskPct: 0 };
+  } finally {
+    monitorLoading.value = false;
+  }
+}
+
+
 function handleRunSnippet(command: string) {
-  if (activeSessionId.value && terminalRefs.value[activeSessionId.value]) {
+  if (activeSessionId.value && terminalRefs.value[activeSessionId.value] && sessions.value.find(s => s.id === activeSessionId.value)?.type !== 'player') {
     terminalRefs.value[activeSessionId.value].write(command + '\n');
     showToast('已发送命令片段');
   } else {
-    showToast('没有活动的终端窗口', 'error');
+    showToast('没有活动的终端窗口可以接收命令', 'error');
+  }
+}
+
+async function openRecordingFile() {
+  try {
+    const selected = await open({
+      title: '选择回放文件',
+      filters: [{ name: 'Asciicast', extensions: ['cast'] }],
+      multiple: false,
+    });
+    if (selected && !Array.isArray(selected)) {
+      const filename = selected.split(/[\/\\]/).pop() || '播放录像';
+      const id = crypto.randomUUID();
+      sessions.value.push({
+        id,
+        title: '▶️ ' + filename,
+        type: 'player',
+        filePath: selected as string,
+      });
+      activeSessionId.value = id;
+      viewMode.value = 'main';
+    }
+  } catch (err) {
+    showToast('选择录像文件失败: ' + err, 'error');
   }
 }
 
@@ -159,6 +297,27 @@ function isHostActive(host: Host) {
   return sessions.value.some(s => s.type === 'ssh' && s.host?.id === host.id);
 }
 
+// 根据字符串生成固定的 HSL 颜色
+function hostAvatarColor(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  const h = Math.abs(hash) % 360;
+  return `hsl(${h}, 55%, 48%)`;
+}
+// 取主机名首字母（至多2个）
+function hostAvatarText(name: string): string {
+  const words = name.trim().split(/[\s\-_\.]+/);
+  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+  return name.slice(0, 2).toUpperCase();
+}
+// 分组内主机数
+function groupHostCount(groupId: number | null): number {
+  return groupId === null
+    ? savedHosts.value.filter(h => !h.group_id).length
+    : savedHosts.value.filter(h => h.group_id === groupId).length;
+}
+
+
 async function loadHosts() {
   try {
     savedHosts.value = await invoke("get_hosts");
@@ -181,6 +340,7 @@ onMounted(async () => {
   
   // 无论什么模式，都需要加载业务分组以便选择
   loadGroups();
+  loadRecents();
 
   if (view === 'add-host') {
     viewMode.value = 'add-host';
@@ -601,6 +761,9 @@ async function connectToHost(host: Host) {
       keepaliveSecs,
     });
     showToast(`成功连接到 ${host.name}`);
+    // 记录最近连接
+    if (host.id) invoke('record_recent', { hostId: host.id }).catch(() => {});
+    loadRecents();
   } catch (err) {
     console.error("连接异常:", err);
     showToast(`连接失败: ${err}`, "error");
@@ -800,6 +963,30 @@ async function saveWindowSize() {
         </div>
       </div>
 
+      <!-- 最近连接 -->
+      <div v-if="recentHosts.length > 0 && !searchQuery" class="recent-section">
+        <div class="recent-header">最近连接</div>
+        <div
+          v-for="h in recentHosts"
+          :key="`recent-${h.id}`"
+          class="recent-item"
+          @click="connectToHost(h)"
+          :title="`双击连接 ${h.name}`"
+        >
+          <div class="host-avatar recent-avatar" :style="{ background: hostAvatarColor(h.name) }">
+            {{ hostAvatarText(h.name) }}
+            <span v-if="isHostActive(h)" class="avatar-online"></span>
+          </div>
+          <div class="host-meta">
+            <span class="host-name">{{ h.name }}</span>
+            <span class="host-addr">{{ h.username }}@{{ h.host }}</span>
+          </div>
+          <button class="recent-connect-btn" @click.stop="connectToHost(h)" title="连接">
+            <SvgIcon name="play" size="12" />
+          </button>
+        </div>
+      </div>
+
       <div class="host-list">
         <!-- 渲染分组及其主机 -->
         <div v-for="g in groups" :key="g.id!" 
@@ -811,43 +998,45 @@ async function saveWindowSize() {
         >
           <div class="group-header" @click="toggleGroup(g.id!)">
             <span class="chevron">›</span>
-            <SvgIcon name="group" size="16" class="folder-icon" />
+            <SvgIcon name="group" size="15" class="folder-icon" />
             <span class="group-name">{{ g.name }}</span>
             <div class="group-actions">
               <button class="icon-btn" @click.stop="editGroup(g)" title="编辑分组">
-                <SvgIcon name="edit" size="14" />
+                <SvgIcon name="edit" size="13" />
               </button>
               <button class="icon-btn delete-btn" @click.stop="deleteGroup(g.id!)" title="删除分组">
-                <SvgIcon name="delete" size="14" />
+                <SvgIcon name="delete" size="13" />
               </button>
             </div>
+            <span class="group-count">{{ groupHostCount(g.id!) }}</span>
           </div>
           <div class="group-content" v-show="!isGroupCollapsed(g.id!) || searchQuery">
-            <div 
-              v-for="h in filteredHosts().filter((h: Host) => h.group_id === g.id)" 
-              :key="h.id!" 
-              class="host-item" 
+            <div
+              v-for="h in filteredHosts().filter((h: Host) => h.group_id === g.id)"
+              :key="h.id!"
+              class="host-card"
               @dblclick="connectToHost(h)"
               draggable="true"
               @dragstart="onDragStart($event, h.id!)"
             >
-              <div class="host-info">
-                <div class="host-name-row">
-                  <span v-if="isHostActive(h)" class="status-dot"></span>
-                  <span class="host-name">{{ h.name }}</span>
-                </div>
-                <span class="host-ip">{{ h.username }}@{{ h.host }}</span>
+              <div class="host-avatar" :style="{ background: hostAvatarColor(h.name) }">
+                {{ hostAvatarText(h.name) }}
+                <span v-if="isHostActive(h)" class="avatar-online"></span>
+              </div>
+              <div class="host-meta">
+                <span class="host-name">{{ h.name }}</span>
+                <span class="host-addr">{{ h.username }}@{{ h.host }}</span>
               </div>
               <div class="host-actions">
-                 <button class="icon-btn" @click.stop="connectToHost(h)" title="连接">
-                   <SvgIcon name="play" size="14" />
-                 </button>
-                 <button class="icon-btn" @click.stop="editHost(h)" title="编辑">
-                   <SvgIcon name="edit" size="14" />
-                 </button>
-                 <button class="icon-btn delete-btn" @click.stop="deleteHost(h.id!)" title="删除">
-                   <SvgIcon name="delete" size="14" />
-                 </button>
+                <button class="icon-btn" @click.stop="connectToHost(h)" title="连接">
+                  <SvgIcon name="play" size="13" />
+                </button>
+                <button class="icon-btn" @click.stop="editHost(h)" title="编辑">
+                  <SvgIcon name="edit" size="13" />
+                </button>
+                <button class="icon-btn delete-btn" @click.stop="deleteHost(h.id!)" title="删除">
+                  <SvgIcon name="delete" size="13" />
+                </button>
               </div>
             </div>
           </div>
@@ -861,35 +1050,37 @@ async function saveWindowSize() {
         >
           <div class="group-header" @click="collapsedUnGrouped = !collapsedUnGrouped">
             <span class="chevron">›</span>
-            <SvgIcon name="group" size="16" class="folder-icon" />
+            <SvgIcon name="group" size="15" class="folder-icon" />
             <span class="group-name">未分组</span>
+            <span class="group-count">{{ groupHostCount(null) }}</span>
           </div>
           <div class="group-content" v-show="!collapsedUnGrouped || searchQuery">
-            <div 
-              v-for="h in filteredHosts().filter((h: Host) => !h.group_id)" 
-              :key="h.id!" 
-              class="host-item" 
+            <div
+              v-for="h in filteredHosts().filter((h: Host) => !h.group_id)"
+              :key="h.id!"
+              class="host-card"
               @dblclick="connectToHost(h)"
               draggable="true"
               @dragstart="onDragStart($event, h.id!)"
             >
-              <div class="host-info">
-                <div class="host-name-row">
-                  <span v-if="isHostActive(h)" class="status-dot"></span>
-                  <span class="host-name">{{ h.name }}</span>
-                </div>
-                <span class="host-ip">{{ h.username }}@{{ h.host }}</span>
+              <div class="host-avatar" :style="{ background: hostAvatarColor(h.name) }">
+                {{ hostAvatarText(h.name) }}
+                <span v-if="isHostActive(h)" class="avatar-online"></span>
+              </div>
+              <div class="host-meta">
+                <span class="host-name">{{ h.name }}</span>
+                <span class="host-addr">{{ h.username }}@{{ h.host }}</span>
               </div>
               <div class="host-actions">
-                 <button class="icon-btn" @click.stop="connectToHost(h)" title="连接">
-                   <SvgIcon name="play" size="14" />
-                 </button>
-                 <button class="icon-btn" @click.stop="editHost(h)" title="编辑">
-                   <SvgIcon name="edit" size="14" />
-                 </button>
-                 <button class="icon-btn delete-btn" @click.stop="deleteHost(h.id!)" title="删除">
-                   <SvgIcon name="delete" size="14" />
-                 </button>
+                <button class="icon-btn" @click.stop="connectToHost(h)" title="连接">
+                  <SvgIcon name="play" size="13" />
+                </button>
+                <button class="icon-btn" @click.stop="editHost(h)" title="编辑">
+                  <SvgIcon name="edit" size="13" />
+                </button>
+                <button class="icon-btn delete-btn" @click.stop="deleteHost(h.id!)" title="删除">
+                  <SvgIcon name="delete" size="13" />
+                </button>
               </div>
             </div>
           </div>
@@ -921,6 +1112,10 @@ async function saveWindowSize() {
           <SvgIcon name="credential" size="18" class="footer-icon" />
           <span>凭据中心</span>
         </div>
+        <div class="footer-item" title="本地录像" @click="openRecordingFile">
+          <SvgIcon name="play" size="18" class="footer-icon" />
+          <span>播放回放</span>
+        </div>
         <div class="footer-item" title="设置" @click="openSettingsWindow">
           <SvgIcon name="settings" size="18" class="footer-icon" />
           <span>设置</span>
@@ -928,25 +1123,79 @@ async function saveWindowSize() {
       </div>
     </aside>
     <main class="main-content">
-      <header class="top-bar">
+      <header class="top-bar" :class="{ 'broadcast-on': broadcastMode }">
         <div v-if="sessions.length === 0" class="no-tabs">未连接</div>
-        <div 
-          v-for="session in sessions" 
-          :key="session.id" 
+        <div
+          v-for="session in sessions"
+          :key="session.id"
           class="tab"
-          :class="{ 
+          :class="{
             active: activeSessionId === session.id,
-            disconnected: session.connected === false
+            disconnected: session.connected === false,
+            'bc-selected': broadcastMode && broadcastSelected.has(session.id)
           }"
           @click="activeSessionId = session.id"
           @contextmenu.prevent="onTabContextMenu($event, session)"
         >
+          <!-- 广播模式勾选 -->
+          <span
+            v-if="broadcastMode"
+            class="bc-check"
+            @click.stop="broadcastSelected.has(session.id)
+              ? broadcastSelected.delete(session.id)
+              : broadcastSelected.add(session.id)"
+          >{{ broadcastSelected.has(session.id) ? '✅' : '□' }}</span>
           <span>{{ session.title }}</span>
           <div class="tab-actions">
+            <span
+              v-if="session.type === 'ssh'"
+              class="rec-btn"
+              :class="{ recording: recordingSessionId === session.id }"
+              @click.stop="toggleRecording(session.id, session.title)"
+              :title="recordingSessionId === session.id ? '停止录制' : '开始录制'"
+            >{{ recordingSessionId === session.id ? '⏹ REC' : '⏺' }}</span>
             <SvgIcon name="close" size="12" class="close-icon" @click.stop="closeSession(session.id)" />
           </div>
         </div>
+        <!-- 广播按钮 -->
+        <div class="top-bar-extra">
+          <button
+            v-if="sessions.length > 0"
+            class="bc-toggle-btn"
+            :class="{ active: broadcastMode }"
+            title="广播模式"
+            @click="toggleBroadcast"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="14" height="14"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/></svg>
+            广播
+          </button>
+          <button
+            v-if="sessions.find(s => s.id === activeSessionId)?.type === 'ssh'"
+            class="bc-toggle-btn"
+            title="监控快照"
+            @click="openMonitor(sessions.find(s => s.id === activeSessionId))"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="14" height="14"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/><polyline points="6 9 10 13 14 8 18 12"/></svg>
+            监控
+          </button>
+        </div>
       </header>
+      <!-- 广播输入条 -->
+      <div v-if="broadcastMode" class="broadcast-bar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="14" height="14"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/></svg>
+        <span class="bc-label">
+          广播{{ broadcastSelected.size > 0 ? ` (已选 ${broadcastSelected.size} 个)` : ` (全部 ${sessions.length} 个)` }}
+        </span>
+        <input
+          v-model="broadcastInput"
+          class="bc-input"
+          placeholder="输入命令发送到所有会话... (Enter 执行)"
+          @keydown.enter="sendBroadcast"
+          autofocus
+        />
+        <button class="bc-send-btn" @click="sendBroadcast">发送</button>
+        <button class="bc-close-btn" @click="toggleBroadcast">×</button>
+      </div>
       <div class="terminal-wrapper">
         <div v-if="connecting" class="terminal-overlay">
           <div class="loader"></div>
@@ -970,21 +1219,141 @@ async function saveWindowSize() {
           </div>
         </div>
         <div class="main-terminal-area">
-          <Terminal 
-            v-for="session in sessions" 
-            :key="session.id"
-            v-show="activeSessionId === session.id"
-            :ref="(el) => setTerminalRef(session.id, el)"
-            :session-id="session.id" 
-            :is-active="activeSessionId === session.id"
-            :type="session.type"
-          />
+          <template v-for="session in sessions" :key="session.id">
+            <Terminal 
+              v-if="session.type !== 'player'"
+              v-show="activeSessionId === session.id"
+              :ref="(el: any) => setTerminalRef(session.id, el)"
+              :session-id="session.id" 
+              :is-active="activeSessionId === session.id"
+              :type="(session.type as 'ssh' | 'local')"
+            />
+            <SessionPlayer
+              v-else
+              v-show="activeSessionId === session.id"
+              :file-path="session.filePath!"
+            />
+          </template>
         </div>
       </div>
     </main>
     <SnippetSidebar v-if="showSnippetSidebar" @run-snippet="handleRunSnippet" @close="showSnippetSidebar = false" />
-    <AiSidebar v-if="showAiSidebar" @run-command="handleRunSnippet" @toast="showToast" @close="showAiSidebar = false" />
+    <AiSidebar v-if="showAiSidebar" @run-command="handleRunSnippet" @toast="(t: any) => showToast(t.message, t.type)" @close="showAiSidebar = false" />
   </div>
+
+  <!-- 监控快照 Modal -->
+  <div v-if="showMonitor" class="monitor-overlay" @click.self="showMonitor = false">
+    <div class="monitor-modal">
+      <!-- Header -->
+      <div class="monitor-header">
+        <div class="monitor-title-area">
+          <div class="monitor-icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="20" height="20"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/><polyline points="6 9 10 13 14 8 18 12"/></svg>
+          </div>
+          <div>
+            <div class="monitor-modal-title">主机监控</div>
+            <div class="monitor-modal-sub" v-if="monitorStats">
+              {{ monitorStats.hostname }} · {{ monitorStats.os }}
+            </div>
+          </div>
+        </div>
+        <button class="monitor-close" @click="showMonitor = false">×</button>
+      </div>
+
+      <!-- Loading -->
+      <div v-if="monitorLoading" class="monitor-loading">
+        <div class="monitor-spinner"></div>
+        <span>正在连接并采集数据...</span>
+      </div>
+
+      <!-- Dashboard -->
+      <div v-else-if="monitorStats" class="monitor-dash">
+        <!-- Row 1: CPU + Uptime -->
+        <div class="dash-row">
+          <!-- CPU Gauge -->
+          <div class="dash-card dash-cpu">
+            <div class="dash-card-label">CPU 使用率</div>
+            <div class="cpu-gauge-wrap">
+              <svg class="cpu-gauge" viewBox="0 0 120 80" width="120" height="80">
+                <!-- Background arc -->
+                <path d="M 15 75 A 50 50 0 0 1 105 75" fill="none" stroke="#e8edff" stroke-width="10" stroke-linecap="round"/>
+                <!-- Value arc -->
+                <path
+                  d="M 15 75 A 50 50 0 0 1 105 75"
+                  fill="none"
+                  :stroke="monitorStats.cpuUsed > 80 ? '#ef4444' : monitorStats.cpuUsed > 60 ? '#f59e0b' : '#6366f1'"
+                  stroke-width="10"
+                  stroke-linecap="round"
+                  :stroke-dasharray="`${monitorStats.cpuUsed * 1.571} 157.1`"
+                />
+                <text x="60" y="68" text-anchor="middle" font-size="20" font-weight="800" :fill="monitorStats.cpuUsed > 80 ? '#ef4444' : '#1a1a2e'">{{ monitorStats.cpuUsed.toFixed(1) }}%</text>
+              </svg>
+            </div>
+            <div class="cpu-gauge-hint">1分钟负载: <strong>{{ monitorStats.load1 }}</strong></div>
+          </div>
+
+          <!-- Uptime / Info -->
+          <div class="dash-card dash-info">
+            <div class="dash-card-label">运行时长</div>
+            <div class="uptime-text">{{ monitorStats.uptimeRaw }}</div>
+          </div>
+        </div>
+
+        <!-- Row 2: Memory + Disk -->
+        <div class="dash-row">
+          <!-- Memory -->
+          <div class="dash-card">
+            <div class="dash-card-label">
+              内存
+              <span class="dash-pct-badge" :class="{ warn: monitorStats.memPct > 80 }">{{ monitorStats.memPct }}%</span>
+            </div>
+            <div class="bar-wrap">
+              <div class="bar-bg">
+                <div
+                  class="bar-fill"
+                  :class="{ 'bar-warn': monitorStats.memPct > 80 }"
+                  :style="{ width: monitorStats.memPct + '%' }"
+                ></div>
+              </div>
+            </div>
+            <div class="bar-meta">
+              <span>已用 {{ (monitorStats.memUsed / 1024).toFixed(1) }} GB</span>
+              <span>共 {{ (monitorStats.memTotal / 1024).toFixed(1) }} GB</span>
+            </div>
+          </div>
+
+          <!-- Disk -->
+          <div class="dash-card">
+            <div class="dash-card-label">
+              磁盘 (/)
+              <span class="dash-pct-badge" :class="{ warn: monitorStats.diskPct > 80 }">{{ monitorStats.diskPct }}%</span>
+            </div>
+            <div class="bar-wrap">
+              <div class="bar-bg">
+                <div
+                  class="bar-fill bar-disk"
+                  :class="{ 'bar-warn': monitorStats.diskPct > 80 }"
+                  :style="{ width: monitorStats.diskPct + '%' }"
+                ></div>
+              </div>
+            </div>
+            <div class="bar-meta">
+              <span>已用 {{ (monitorStats.diskUsed / 1024).toFixed(1) }} GB</span>
+              <span>共 {{ (monitorStats.diskTotal / 1024).toFixed(1) }} GB</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="monitor-footer">
+        <button class="monitor-refresh-btn" @click="openMonitor(monitorSession)" :disabled="monitorLoading">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
+          刷新数据
+        </button>
+      </div>
+    </div>
+  </div>
+
 
   <!-- Standalone Form / Modal -->
   <div v-if="viewMode !== 'main' || showAddModal || showGroupModal" 
@@ -1108,7 +1477,7 @@ async function saveWindowSize() {
       </div>
     </div>
         <div v-if="viewMode === 'settings'" class="modal-content standalone-window premium-modal" style="width: 100%; height: 100vh; border-radius: 0; padding: 0; background-color: var(--bg-main);">
-      <SettingsModal @close="cancelForm" @toast="showToast" />
+      <SettingsModal @close="cancelForm" @toast="(t: any) => showToast(t.message, t.type)" />
     </div>
 
     <!-- Credentials Standalone -->
@@ -1350,6 +1719,183 @@ body, html, #app {
   opacity: 0.9;
 }
 
+/* ===== \u5e7f\u64ad\u6a21\u5f0f ===== */
+.top-bar-extra { margin-left: auto; display: flex; align-items: center; gap: 6px; padding: 0 8px; margin-bottom: 5px; }
+.bc-toggle-btn {
+  display: flex; align-items: center; gap: 5px;
+  background: none; border: 1.5px solid var(--border-color); border-radius: 8px;
+  padding: 3px 10px; font-size: 11px; font-weight: 600; color: var(--text-dim);
+  cursor: pointer; transition: all 0.18s; white-space: nowrap;
+}
+.bc-toggle-btn:hover, .bc-toggle-btn.active { background: var(--accent-color, #6366f1); color: white; border-color: transparent; }
+.bc-check { font-size: 12px; cursor: pointer; user-select: none; }
+.tab.bc-selected { background: rgba(99,102,241,0.15); border-color: #6366f1; }
+
+.broadcast-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px;
+  background: linear-gradient(90deg, #1e1b4b 0%, #312e81 100%);
+  border-bottom: 1px solid rgba(99,102,241,0.3);
+}
+.bc-label { font-size: 11px; font-weight: 700; color: #a5b4fc; white-space: nowrap; }
+.bc-input {
+  flex: 1; background: rgba(255,255,255,0.08); border: 1px solid rgba(99,102,241,0.4);
+  border-radius: 7px; padding: 5px 10px; font-size: 12px; color: white;
+  font-family: 'JetBrains Mono', monospace; outline: none;
+}
+.bc-input::placeholder { color: rgba(255,255,255,0.35); }
+.bc-input:focus { border-color: #818cf8; }
+.bc-send-btn {
+  padding: 5px 16px; background: #6366f1; border: none; border-radius: 7px;
+  color: white; font-size: 12px; font-weight: 700; cursor: pointer; transition: background 0.15s;
+}
+.bc-send-btn:hover { background: #4f46e5; }
+.bc-close-btn {
+  background: none; border: none; color: rgba(255,255,255,0.5);
+  font-size: 18px; cursor: pointer; padding: 0 4px; line-height: 1;
+}
+.bc-close-btn:hover { color: white; }
+
+/* ===== REC \u5f55\u5236\u6309\u94ae ===== */
+.rec-btn {
+  font-size: 10px; font-weight: 700; cursor: pointer;
+  color: var(--text-dim); padding: 1px 6px; border-radius: 5px;
+  transition: all 0.15s; user-select: none; white-space: nowrap;
+}
+.rec-btn.recording { color: #ef4444; animation: blink 1.2s infinite; }
+@keyframes blink { 50% { opacity: 0.4; } }
+
+/* ===== \u76d1\u63a7\u5feb\u7167 Modal ===== */
+.monitor-overlay {
+  position: fixed; inset: 0; z-index: 300;
+  background: rgba(0,0,0,0.4); backdrop-filter: blur(6px);
+  display: flex; align-items: center; justify-content: center;
+}
+.monitor-modal {
+  background: #fff; border-radius: 18px;
+  width: 560px; max-width: 94vw; max-height: 80vh;
+  box-shadow: 0 28px 80px rgba(0,0,0,0.22);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.monitor-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 22px; border-bottom: 1px solid #eff0f8;
+  background: linear-gradient(120deg, #f8f9ff 0%, #eef2ff 100%);
+}
+.monitor-title-area { display: flex; align-items: center; gap: 12px; }
+.monitor-icon-wrap {
+  width: 40px; height: 40px; border-radius: 12px;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  display: flex; align-items: center; justify-content: center;
+  color: white; flex-shrink: 0;
+}
+.monitor-modal-title { font-size: 16px; font-weight: 800; color: #1a1a2e; }
+.monitor-modal-sub { font-size: 11px; color: #6b7280; margin-top: 1px; }
+.monitor-close {
+  background: none; border: none; font-size: 22px; cursor: pointer;
+  color: #9ca3af; line-height: 1; padding: 2px 4px; border-radius: 6px;
+  transition: all 0.15s;
+}
+.monitor-close:hover { background: #f3f4f6; color: #374151; }
+
+.monitor-loading {
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  padding: 50px; color: #6b7280; font-size: 13px;
+}
+.monitor-spinner {
+  width: 34px; height: 34px; border: 3px solid #e5e7eb;
+  border-top-color: #6366f1; border-radius: 50%; animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.monitor-dash { padding: 16px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+.dash-row { display: flex; gap: 12px; }
+.dash-card {
+  flex: 1; background: #f8faff; border: 1.5px solid #e8edff;
+  border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 8px;
+  transition: box-shadow 0.15s;
+}
+.dash-card:hover { box-shadow: 0 6px 20px rgba(99,102,241,0.1); }
+.dash-card-label {
+  font-size: 10px; font-weight: 800; text-transform: uppercase;
+  letter-spacing: 0.07em; color: #9ca3af;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.dash-pct-badge {
+  font-size: 12px; font-weight: 700; color: #6366f1;
+  background: #eef2ff; border-radius: 6px; padding: 1px 8px;
+}
+.dash-pct-badge.warn { color: #ef4444; background: #fef2f2; }
+
+/* CPU gauge */
+.dash-cpu { align-items: center; }
+.cpu-gauge-wrap { display: flex; justify-content: center; }
+.cpu-gauge-hint { font-size: 11px; color: #6b7280; text-align: center; }
+.cpu-gauge-hint strong { color: #374151; }
+
+/* Memory / Disk bars */
+.bar-wrap { padding: 4px 0; }
+.bar-bg {
+  height: 10px; background: #e8edff; border-radius: 99px; overflow: hidden;
+}
+.bar-fill {
+  height: 100%; border-radius: 99px;
+  background: linear-gradient(90deg, #6366f1, #8b5cf6);
+  transition: width 0.6s cubic-bezier(.2,.8,.4,1);
+}
+.bar-fill.bar-disk { background: linear-gradient(90deg, #06b6d4, #3b82f6); }
+.bar-fill.bar-warn { background: linear-gradient(90deg, #f59e0b, #ef4444); }
+.bar-meta {
+  display: flex; justify-content: space-between;
+  font-size: 11px; color: #6b7280;
+}
+
+/* Uptime card */
+.dash-info { flex: 1.2; }
+.uptime-text {
+  font-size: 12px; color: #374151; font-family: 'JetBrains Mono', monospace;
+  white-space: pre-wrap; line-height: 1.6; word-break: break-all;
+}
+
+.monitor-footer {
+  padding: 12px 20px; border-top: 1px solid #eff0f8;
+  display: flex; justify-content: flex-end;
+}
+.monitor-refresh-btn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 20px; background: #6366f1; color: white;
+  border: none; border-radius: 9px; font-size: 13px; font-weight: 700;
+  cursor: pointer; transition: background 0.15s;
+}
+.monitor-refresh-btn:hover:not(:disabled) { background: #4f46e5; }
+.monitor-refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+
+/* ===== \u6700\u8fd1\u8fde\u63a5 ===== */
+
+.recent-section {
+  padding: 0 8px 8px;
+  border-bottom: 1px solid var(--border-color, #e8e8ed);
+  margin-bottom: 6px;
+}
+.recent-header {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--text-dim); padding: 6px 4px 4px;
+  opacity: 0.7;
+}
+.recent-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 6px; border-radius: 8px; cursor: pointer; transition: background 0.15s;
+}
+.recent-item:hover { background: var(--sidebar-hover); }
+.recent-item:hover .recent-connect-btn { opacity: 1; }
+.recent-avatar { width: 28px; height: 28px; border-radius: 7px; font-size: 10px; }
+.recent-connect-btn {
+  opacity: 0; background: var(--accent-color); border: none; border-radius: 6px;
+  width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
+  cursor: pointer; color: white; transition: opacity 0.15s; flex-shrink: 0;
+}
+
 .group-content {
   margin-left: 20px;
   padding-left: 12px;
@@ -1371,28 +1917,64 @@ body, html, #app {
 }
 .host-item:hover { background: var(--sidebar-hover); transform: translateX(2px); }
 
-.host-info { display: flex; flex-direction: column; overflow: hidden; }
-.host-name-row { display: flex; align-items: center; gap: 6px; }
-.status-dot {
-  min-width: 8px; height: 8px; border-radius: 50%;
-  background: #34c759;
-  box-shadow: 0 0 8px rgba(52, 199, 89, 0.4);
+/* ===== Card Style ===== */
+.host-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  margin-bottom: 2px;
+  position: relative;
+}
+.host-card:hover { background: var(--sidebar-hover); transform: translateX(2px); }
+.host-card:hover .host-actions { opacity: 1; pointer-events: all; }
+.group-header:hover .group-name { color: var(--text-main); }
+
+/* 分组主机计数角标 */
+.group-count {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 16px; padding: 0 5px;
+  font-size: 10px; font-weight: 600; border-radius: 8px;
+  background: rgba(0,0,0,0.07); color: var(--text-dim);
+  margin-left: auto; flex-shrink: 0;
+}
+
+.host-avatar {
+  position: relative;
+  width: 34px; height: 34px; border-radius: 10px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: white; letter-spacing: 0;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+}
+.avatar-online {
+  position: absolute; right: -2px; bottom: -2px;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #34c759; border: 2px solid var(--bg-sidebar, #f5f5f7);
+  box-shadow: 0 0 6px rgba(52,199,89,0.5);
   animation: pulse 2s infinite;
 }
-@keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
-.host-name { font-size: 0.85rem; font-weight: 500; color: #1a1a1a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.host-item:hover .host-name { color: var(--accent-color); }
-.host-ip { font-size: 0.65rem; color: var(--text-dim); opacity: 0.6; font-family: 'JetBrains Mono', monospace; margin-top: 1px; }
-.host-item:hover .host-ip { opacity: 0.9; }
+.host-meta {
+  flex: 1;
+  display: flex; flex-direction: column; overflow: hidden;
+  gap: 2px;
+}
+.host-name { font-size: 0.83rem; font-weight: 600; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.host-addr { font-size: 0.65rem; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.7; }
 
-.host-actions { display: flex; gap: 8px; opacity: 0; }
+/* hide actions by default, show on hover */
+.host-actions { display: flex; gap: 4px; opacity: 0; pointer-events: none; transition: opacity 0.15s; flex-shrink: 0; }
 .host-item:hover .host-actions { opacity: 1; }
 
 .icon-btn {
-  background: none; border: none; padding: 4px; border-radius: 4px;
+  background: none; border: none; padding: 3px; border-radius: 4px;
   color: var(--text-dim); cursor: pointer; transition: 0.2s;
-  font-size: 0.85rem;
+  font-size: 0.85rem; display: flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; flex-shrink: 0;
 }
+.icon-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
 .icon-btn:hover { color: var(--accent-color); background: var(--border-color); }
 .delete-btn:hover { color: var(--danger) !important; }
 

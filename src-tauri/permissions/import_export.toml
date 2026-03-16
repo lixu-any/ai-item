@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-export-data"
+description = "Enables the export_data command."
+commands.allow = ["export_data"]
+
+[[permission]]
+identifier = "allow-import-data"
+description = "Enables the import_data command."
+commands.allow = ["import_data"]

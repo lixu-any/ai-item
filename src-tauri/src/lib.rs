@@ -10,6 +10,7 @@ mod db;
 mod ssh;
 mod pty;
 mod ai;
+mod fonts;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -17,6 +18,7 @@ pub fn run() {
         .manage(ssh::SessionPool(Default::default()))
         .manage(pty::PtySessionPool(Default::default()))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             db::init_db(app.handle())?;
             
@@ -83,7 +85,13 @@ pub fn run() {
             db::get_credentials,
             db::delete_credential,
             db::update_credential,
-            ai::ask_ai
+            ai::ask_ai,
+            db::export_data,
+            db::import_data,
+            db::record_recent,
+            db::get_recents,
+            fonts::get_system_fonts,
+            ssh::get_host_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

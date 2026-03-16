@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-get-host-stats"
+description = "Enables the get_host_stats command."
+commands.allow = ["get_host_stats"]

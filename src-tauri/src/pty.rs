@@ -36,8 +36,12 @@ pub async fn open_pty_session(
         })
         .map_err(|e| e.to_string())?;
 
-    // 在 Mac 上通常默认使用 zsh 或 bash
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    // 跨平台 shell 检测：Windows 用 cmd.exe，Unix 用 $SHELL
+    #[cfg(target_os = "windows")]
+    let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+    #[cfg(not(target_os = "windows"))]
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+
     let mut cmd = CommandBuilder::new(&shell);
     
     // 设置环境变量，增强终端兼容性

@@ -1,12 +1,23 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { emit as tauriEmit } from '@tauri-apps/api/event';
+import { save, open } from '@tauri-apps/plugin-dialog';
+import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs';
+
+interface ImportResult {
+  groups_added: number;
+  hosts_added: number;
+  snippets_added: number;
+  credentials_added: number;
+  settings_applied: number;
+  skipped: number;
+}
 
 const emit = defineEmits(['close', 'toast']);
 
 // ---- 当前选中 Tab ----
-const activeTab = ref<'ai' | 'terminal' | 'ssh'>('ai');
+const activeTab = ref<'ai' | 'terminal' | 'ssh' | 'data'>('ai');
 
 // ---- AI 设置 ----
 const apiKey = ref('');
@@ -21,13 +32,43 @@ const termFontFamily = ref('"Cascadia Code", Menlo, Monaco, monospace');
 const termCursorStyle = ref<'block' | 'underline' | 'bar'>('block');
 const tabTitleMode = ref<'ip' | 'name'>('ip');
 
-const fontPresets = [
-  { label: 'Cascadia Code', value: '"Cascadia Code", Menlo, Monaco, monospace' },
-  { label: 'JetBrains Mono', value: '"JetBrains Mono", Menlo, monospace' },
-  { label: 'Fira Code', value: '"Fira Code", Menlo, Monaco, monospace' },
-  { label: 'SF Mono', value: '"SF Mono", Menlo, monospace' },
-  { label: 'Menlo', value: 'Menlo, Monaco, monospace' },
-  { label: 'Courier New', value: '"Courier New", monospace' },
+// ---- 系统字体 ----
+const systemFonts = ref<string[]>([]);
+const fontSearch = ref('');
+const showFontDropdown = ref(false);
+const filteredFonts = computed(() => {
+  const q = fontSearch.value.trim().toLowerCase();
+  if (!q) return systemFonts.value.slice(0, 100); // 最多显示 100 条
+  return systemFonts.value.filter(f => f.toLowerCase().includes(q)).slice(0, 100);
+});
+const selectedFontLabel = computed(() => {
+  // 从 CSS 字符串提取第一个字体名
+  const m = termFontFamily.value.match(/['"]?([^,'"+]+)['"]?/);
+  return m ? m[1].trim().replace(/["']/g, '') : termFontFamily.value;
+});
+
+async function loadSystemFonts() {
+  try {
+    const fonts = await invoke<string[]>('get_system_fonts');
+    systemFonts.value = fonts;
+  } catch {
+    // 加载失败时保留空列表，不影响其他设置
+  }
+}
+
+function selectFont(name: string) {
+  termFontFamily.value = `"${name}", monospace`;
+  fontSearch.value = name;
+  showFontDropdown.value = false;
+}
+
+function onFontSearchFocus() {
+  fontSearch.value = selectedFontLabel.value;
+  showFontDropdown.value = true;
+}
+
+const recommendedFonts = [
+  'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'Courier New',
 ];
 
 // ---- SSH 设置 ----
@@ -98,12 +139,64 @@ async function saveSettings() {
   }
 }
 
+// ---- 数据管理 ----
+const includeCredentials = ref(false);
+const includeSettings = ref(true);
+const isExporting = ref(false);
+const isImporting = ref(false);
+const importResult = ref<ImportResult | null>(null);
+
+async function doExport() {
+  isExporting.value = true;
+  try {
+    const json = await invoke<string>('export_data', {
+      includeCredentials: includeCredentials.value,
+      includeSettings: includeSettings.value,
+    });
+    const filePath = await save({
+      defaultPath: 'nixu-backup.nixu',
+      filters: [{ name: 'Nixu Backup', extensions: ['nixu', 'json'] }],
+    });
+    if (filePath) {
+      await writeTextFile(filePath, json);
+      emit('toast', { message: '导出成功 ✓', type: 'success' });
+    }
+  } catch (err) {
+    emit('toast', { message: '导出失败: ' + err, type: 'error' });
+  } finally {
+    isExporting.value = false;
+  }
+}
+
+async function doImport() {
+  isImporting.value = true;
+  importResult.value = null;
+  try {
+    const filePath = await open({
+      multiple: false,
+      filters: [{ name: 'Nixu Backup', extensions: ['nixu', 'json'] }],
+    });
+    if (!filePath) return;
+    const json = await readTextFile(filePath as string);
+    const result = await invoke<ImportResult>('import_data', { json });
+    importResult.value = result;
+    emit('toast', { message: `导入成功：${result.hosts_added} 台主机`, type: 'success' });
+  } catch (err) {
+    emit('toast', { message: '导入失败: ' + err, type: 'error' });
+  } finally {
+    isImporting.value = false;
+  }
+}
+
 function setPreset(url: string, mdl: string) {
   baseUrl.value = url;
   model.value = mdl;
 }
 
-onMounted(loadSettings);
+onMounted(() => {
+  loadSettings();
+  loadSystemFonts();
+});
 </script>
 
 <template>
@@ -135,6 +228,13 @@ onMounted(loadSettings);
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
           </span>
           <span>SSH 连接</span>
+        </button>
+
+        <button class="nav-item" :class="{ active: activeTab === 'data' }" @click="activeTab = 'data'">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/></svg>
+          </span>
+          <span>数据管理</span>
         </button>
       </nav>
 
@@ -218,17 +318,42 @@ onMounted(loadSettings);
               字体
             </div>
 
-            <!-- 字体族预设 -->
+            <!-- 字体族选择：系统字体 + 搜索 -->
             <div class="form-field">
               <label>终端字体</label>
-              <div class="font-presets">
+              <!-- 常用推荐快捷按钮 -->
+              <div class="font-quick">
                 <button
-                  v-for="f in fontPresets" :key="f.value"
-                  class="font-preset-btn"
-                  :class="{ active: termFontFamily === f.value }"
-                  :style="{ fontFamily: f.value }"
-                  @click="termFontFamily = f.value"
-                >{{ f.label }}</button>
+                  v-for="name in recommendedFonts" :key="name"
+                  class="font-quick-btn"
+                  :class="{ active: selectedFontLabel === name }"
+                  :style="{ fontFamily: name }"
+                  @click="selectFont(name)"
+                >{{ name }}</button>
+              </div>
+              <!-- 可搜索下拉 -->
+              <div class="font-picker" @click.stop>
+                <div class="font-picker-input-wrap">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                  <input
+                    v-model="fontSearch"
+                    class="font-picker-input"
+                    :placeholder="systemFonts.length ? `搜索 ${systemFonts.length} 种系统字体...` : '加载字体中...'"
+                    :style="{ fontFamily: termFontFamily }"
+                    @focus="onFontSearchFocus"
+                    @input="showFontDropdown = true"
+                  />
+                  <span v-if="systemFonts.length === 0" class="font-loading">⟳</span>
+                </div>
+                <div v-if="showFontDropdown && filteredFonts.length > 0" class="font-dropdown" @mousedown.prevent>
+                  <div
+                    v-for="name in filteredFonts" :key="name"
+                    class="font-option"
+                    :class="{ active: selectedFontLabel === name }"
+                    :style="{ fontFamily: name }"
+                    @click="selectFont(name)"
+                  >{{ name }}</div>
+                </div>
               </div>
             </div>
 
@@ -337,6 +462,65 @@ onMounted(loadSettings);
                   <span class="unit">秒</span>
                 </div>
                 <p class="hint">0 = 禁用，推荐 60s 防断连</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ===== 数据管理 ===== -->
+        <div v-if="activeTab === 'data'" class="tab-pane">
+          <div class="pane-header">
+            <h2>数据管理</h2>
+            <p>导出备份或从文件恢复配置数据</p>
+          </div>
+
+          <!-- 导出 -->
+          <div class="section">
+            <div class="section-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              导出数据
+            </div>
+            <div class="form-field">
+              <label>导出文件将包含：主机、分组、命令片段</label>
+              <div class="check-list">
+                <label class="check-item">
+                  <input type="checkbox" v-model="includeSettings" />
+                  <span>应用设置（字体、主题等，不含 AI Key）</span>
+                </label>
+                <label class="check-item warning-check">
+                  <input type="checkbox" v-model="includeCredentials" />
+                  <span>凭据（密码/私钥 <strong>明文</strong> 存储，请妥善保管）</span>
+                </label>
+              </div>
+            </div>
+            <button class="data-btn export-btn" :disabled="isExporting" @click="doExport">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              {{ isExporting ? '导出中...' : '选择位置并导出 (.nixu)' }}
+            </button>
+          </div>
+
+          <!-- 导入 -->
+          <div class="section">
+            <div class="section-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              导入数据
+            </div>
+            <p class="hint">相同名称的主机/片段将被跳过，不会覆盖现有数据</p>
+            <button class="data-btn import-btn" :disabled="isImporting" @click="doImport">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              {{ isImporting ? '导入中...' : '选择 .nixu 文件导入' }}
+            </button>
+
+            <!-- 导入结果 -->
+            <div v-if="importResult" class="import-result">
+              <div class="result-title">✓ 导入完成</div>
+              <div class="result-grid">
+                <div class="result-item"><span class="result-num">{{ importResult.groups_added }}</span><span>分组</span></div>
+                <div class="result-item"><span class="result-num">{{ importResult.hosts_added }}</span><span>主机</span></div>
+                <div class="result-item"><span class="result-num">{{ importResult.snippets_added }}</span><span>片段</span></div>
+                <div class="result-item"><span class="result-num">{{ importResult.credentials_added }}</span><span>凭据</span></div>
+                <div class="result-item"><span class="result-num">{{ importResult.settings_applied }}</span><span>设置项</span></div>
+                <div class="result-item muted"><span class="result-num">{{ importResult.skipped }}</span><span>已跳过</span></div>
               </div>
             </div>
           </div>
@@ -569,6 +753,81 @@ onMounted(loadSettings);
   margin-top: 2px;
 }
 .toggle-opt.active .opt-example { background: #dbeafe; color: #2563eb; }
+
+/* ===== 数据管理 ===== */
+.check-list { display: flex; flex-direction: column; gap: 8px; }
+.check-item {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: #374151; cursor: pointer;
+  padding: 6px 0;
+}
+.check-item input[type="checkbox"] { width: 15px; height: 15px; accent-color: #3b82f6; cursor: pointer; }
+.warning-check { color: #92400e; }
+.warning-check strong { color: #dc2626; }
+/* ===== Font Picker ===== */
+.font-quick { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.font-quick-btn {
+  padding: 4px 10px; border-radius: 6px; border: 1.5px solid var(--border-color, #e2e8f0);
+  background: #f8fafc; font-size: 12px; cursor: pointer; transition: all 0.15s;
+  color: #374151; font-family: inherit;
+}
+.font-quick-btn:hover { border-color: #3b82f6; color: #2563eb; background: #eff6ff; }
+.font-quick-btn.active { border-color: #3b82f6; background: #3b82f6; color: white; font-weight: 600; }
+.font-picker { position: relative; }
+.font-picker-input-wrap {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border: 1.5px solid var(--border-color, #e2e8f0);
+  border-radius: 8px; background: white; transition: border-color 0.15s;
+}
+.font-picker-input-wrap:focus-within { border-color: #3b82f6; }
+.font-picker-input-wrap svg { width: 14px; height: 14px; color: #9ca3af; flex-shrink: 0; }
+.font-picker-input {
+  flex: 1; border: none; outline: none; font-size: 13px;
+  background: transparent; color: #374151; min-width: 0;
+}
+.font-loading { font-size: 14px; color: #9ca3af; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.font-dropdown {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 100;
+  max-height: 200px; overflow-y: auto; border-radius: 10px;
+  background: white; border: 1.5px solid #e2e8f0;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+}
+.font-option {
+  padding: 7px 12px; font-size: 13px; cursor: pointer;
+  transition: background 0.1s; color: #374151;
+}
+.font-option:hover { background: #f0f9ff; }
+.font-option.active { background: #eff6ff; color: #2563eb; font-weight: 600; }
+
+.data-btn {
+  display: flex; align-items: center; gap: 8px;
+  padding: 11px 20px; border-radius: 10px; border: none;
+  font-size: 13.5px; font-weight: 600; cursor: pointer;
+  transition: all 0.15s; font-family: inherit;
+  appearance: none; -webkit-appearance: none;
+  width: 100%; justify-content: center;
+}
+.data-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+.export-btn { background: #3b82f6; color: white; }
+.export-btn:hover:not(:disabled) { background: #2563eb; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(59,130,246,0.4); }
+.import-btn { background: #f1f5f9; color: #374151; border: 1.5px solid #e2e8f0; }
+.import-btn:hover:not(:disabled) { background: #e2e8f0; color: #1e293b; }
+.data-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.import-result {
+  padding: 14px 16px; background: #f0fdf4;
+  border: 1px solid #bbf7d0; border-radius: 10px;
+}
+.result-title { font-size: 13px; font-weight: 600; color: #15803d; margin-bottom: 10px; }
+.result-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.result-item {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 2px; padding: 6px; background: white; border-radius: 6px;
+  border: 1px solid #d1fae5;
+}
+.result-num { font-size: 18px; font-weight: 700; color: #15803d; }
+.result-item span:last-child { font-size: 11px; color: #6b7280; }
+.result-item.muted .result-num { color: #9ca3af; }
 
 
 /* ===== Form ===== */

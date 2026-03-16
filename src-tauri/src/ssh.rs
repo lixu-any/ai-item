@@ -299,3 +299,91 @@ pub async fn close_ssh_session(
     }
     Ok(())
 }
+
+/// 执行系统监控命令并返回 JSON 字符串
+#[tauri::command]
+pub async fn get_host_stats(
+    host: String,
+    port: u16,
+    username: String,
+    password: Option<String>,
+    private_key: Option<String>,
+) -> Result<String, String> {
+    use std::io::Read;
+
+    let addr = format!("{}:{}", host, port);
+    let tcp = std::net::TcpStream::connect_timeout(
+        &addr.parse::<std::net::SocketAddr>().map_err(|e| e.to_string())?,
+        std::time::Duration::from_secs(10),
+    ).map_err(|e| format!("连接失败: {}", e))?;
+
+    let mut sess = Session::new().map_err(|e| e.to_string())?;
+    sess.set_tcp_stream(tcp);
+    sess.set_blocking(true);
+    sess.handshake().map_err(|e| e.to_string())?;
+
+    // 认证
+    if let Some(pk) = &private_key {
+        if !pk.is_empty() {
+            let key_path = std::path::Path::new(pk.as_str());
+            sess.userauth_pubkey_file(&username, None, key_path, None)
+                .map_err(|e| format!("密钥认证失败: {}", e))?;
+        }
+    }
+    if !sess.authenticated() {
+        if let Some(pw) = &password {
+            sess.userauth_password(&username, pw)
+                .map_err(|e| format!("密码认证失败: {}", e))?;
+        }
+    }
+    if !sess.authenticated() {
+        return Err("认证失败".to_string());
+    }
+
+    // 输出结构化 KEY=VALUE，便于前端解析
+    let cmd = r#"
+# OS
+printf "OS=%s\n" "$(uname -sr)"
+
+# Hostname
+printf "HOSTNAME=%s\n" "$(hostname -s 2>/dev/null || hostname)"
+
+# Uptime & load
+UPTIME_STR=$(uptime 2>/dev/null)
+printf "UPTIME_RAW=%s\n" "$UPTIME_STR"
+LOAD=$(echo "$UPTIME_STR" | awk -F'load average[s]*: ' '{print $2}' | awk '{print $1}' | tr -d ',')
+printf "LOAD1=%s\n" "${LOAD:-0}"
+
+# CPU usage (Linux)
+CPU_IDLE=$(top -bn1 2>/dev/null | grep -i "cpu(s)\|%cpu" | head -1 | awk '{for(i=1;i<=NF;i++) if($i~/id/) print $(i-1)}' | tr -d '%')
+if [ -z "$CPU_IDLE" ]; then CPU_IDLE=0; fi
+CPU_USED=$(awk "BEGIN{u=100-$CPU_IDLE; printf \"%.1f\", (u<0?0:u)}")
+printf "CPU_USED=%s\n" "$CPU_USED"
+
+# Memory (Linux: free -m)
+MEM=$(free -m 2>/dev/null | grep "^Mem:")
+if [ -n "$MEM" ]; then
+    MEM_TOTAL=$(echo "$MEM" | awk '{print $2}')
+    MEM_USED=$(echo "$MEM" | awk '{print $3}')
+    printf "MEM_TOTAL=%s\n" "$MEM_TOTAL"
+    printf "MEM_USED=%s\n" "$MEM_USED"
+fi
+
+# Disk /
+DISK=$(df -m / 2>/dev/null | tail -1)
+DISK_TOTAL=$(echo "$DISK" | awk '{print $2}')
+DISK_USED=$(echo "$DISK" | awk '{print $3}')
+DISK_PCT=$(echo "$DISK" | awk '{gsub(/%/,"",$5); print $5}')
+printf "DISK_TOTAL=%s\n" "$DISK_TOTAL"
+printf "DISK_USED=%s\n" "$DISK_USED"
+printf "DISK_PCT=%s\n" "${DISK_PCT:-0}"
+"#;
+
+    let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
+    channel.exec(cmd).map_err(|e| e.to_string())?;
+    let mut output = String::new();
+    channel.read_to_string(&mut output).map_err(|e| e.to_string())?;
+    channel.wait_close().ok();
+
+    Ok(output)
+}

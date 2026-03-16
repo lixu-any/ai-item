@@ -19,6 +19,13 @@ const newSnippetName = ref('');
 const newSnippetCommand = ref('');
 const emit = defineEmits(['run-snippet', 'close']);
 
+// ---- 占位符 modal ----
+const showParamModal = ref(false);
+const paramModalCmd = ref('');
+const paramKeys = ref<string[]>([]);
+const paramValues = ref<Record<string, string>>({});
+
+
 async function loadSnippets() {
   try {
     snippets.value = await invoke('get_snippets');
@@ -69,7 +76,26 @@ function editSnippet(snippet: Snippet) {
 }
 
 function runSnippet(snippet: Snippet) {
-  emit('run-snippet', snippet.command);
+  // 检测 {xxx} 占位符
+  const matches = [...snippet.command.matchAll(/\{([^}]+)\}/g)];
+  const keys = [...new Set(matches.map(m => m[1]))];
+  if (keys.length === 0) {
+    emit('run-snippet', snippet.command);
+    return;
+  }
+  paramModalCmd.value = snippet.command;
+  paramKeys.value = keys;
+  paramValues.value = Object.fromEntries(keys.map(k => [k, '']));
+  showParamModal.value = true;
+}
+
+function confirmParams() {
+  let cmd = paramModalCmd.value;
+  for (const [k, v] of Object.entries(paramValues.value)) {
+    cmd = cmd.split(`{${k}}`).join(v);
+  }
+  emit('run-snippet', cmd);
+  showParamModal.value = false;
 }
 
 onMounted(loadSnippets);
@@ -125,6 +151,32 @@ onMounted(loadSnippets);
          <p>暂无常用命令</p>
          <p style="font-size: 0.7rem; margin-top: 4px;">点击右上角 + 开始添加</p>
        </div>
+    </div>
+
+    <!-- 占位符填参数 Modal -->
+    <div v-if="showParamModal" class="param-modal-overlay" @click.self="showParamModal = false">
+      <div class="param-modal">
+        <div class="param-modal-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="16" height="16"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          填写参数
+        </div>
+        <div class="param-modal-preview">{{ paramModalCmd }}</div>
+        <div class="param-fields">
+          <div v-for="key in paramKeys" :key="key" class="param-field">
+            <label>{{ key }}</label>
+            <input
+              v-model="paramValues[key]"
+              :placeholder="`输入 ${key} 的值`"
+              class="param-input"
+              @keydown.enter="confirmParams"
+            />
+          </div>
+        </div>
+        <div class="param-modal-actions">
+          <button class="pm-cancel" @click="showParamModal = false">取消</button>
+          <button class="pm-confirm" @click="confirmParams">执行</button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -368,4 +420,45 @@ onMounted(loadSnippets);
 .action-btn.save:hover {
   background: var(--accent-hover);
 }
+
+/* ===== Placeholder Modal ===== */
+.param-modal-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,0.35); backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+}
+.param-modal {
+  background: white; border-radius: 14px;
+  padding: 24px; width: 340px; max-width: 90vw;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+  display: flex; flex-direction: column; gap: 16px;
+}
+.param-modal-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 15px; font-weight: 700; color: #1a1a2e;
+}
+.param-modal-preview {
+  background: #f0f4ff; border-radius: 8px; padding: 10px 14px;
+  font-family: 'JetBrains Mono', monospace; font-size: 12px;
+  color: #3b4cca; word-break: break-all;
+}
+.param-fields { display: flex; flex-direction: column; gap: 10px; }
+.param-field { display: flex; flex-direction: column; gap: 4px; }
+.param-field label { font-size: 12px; font-weight: 600; color: #6366f1; }
+.param-input {
+  padding: 8px 12px; border: 1.5px solid #e2e8f0; border-radius: 8px;
+  font-size: 13px; outline: none; transition: border-color 0.15s;
+}
+.param-input:focus { border-color: #6366f1; }
+.param-modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.pm-cancel {
+  padding: 7px 18px; border-radius: 8px; border: 1.5px solid #e2e8f0;
+  background: white; font-size: 13px; cursor: pointer; font-weight: 500;
+}
+.pm-confirm {
+  padding: 7px 20px; border-radius: 8px; border: none;
+  background: #6366f1; color: white; font-size: 13px;
+  cursor: pointer; font-weight: 600; transition: background 0.15s;
+}
+.pm-confirm:hover { background: #4f46e5; }
 </style>
