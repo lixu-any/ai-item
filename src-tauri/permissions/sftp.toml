@@ -1,0 +1,46 @@
+"$schema" = "../gen/schemas/desktop-schema.json"
+
+[[permission]]
+identifier = "allow-sftp-connect"
+description = "Enables the sftp_connect command"
+commands.allow = ["sftp_connect"]
+
+[[permission]]
+identifier = "allow-sftp-read-dir"
+description = "Enables the sftp_read_dir command"
+commands.allow = ["sftp_read_dir"]
+
+[[permission]]
+identifier = "allow-sftp-compress"
+description = "Enables the sftp_compress command"
+commands.allow = ["sftp_compress"] 
+
+[[permission]]
+identifier = "allow-sftp-close"
+description = "Enables the sftp_close command"
+commands.allow = ["sftp_close"]
+
+[[permission]]
+identifier = "allow-sftp-mkdir"
+description = "Enables the sftp_mkdir command"
+commands.allow = ["sftp_mkdir"]
+
+[[permission]]
+identifier = "allow-sftp-delete"
+description = "Enables the sftp_delete command"
+commands.allow = ["sftp_delete"]
+
+[[permission]]
+identifier = "allow-sftp-rename"
+description = "Enables the sftp_rename command"
+commands.allow = ["sftp_rename"]
+
+[[permission]]
+identifier = "allow-sftp-download-file"
+description = "Enables the sftp_download_file command"
+commands.allow = ["sftp_download_file"]
+
+[[permission]]
+identifier = "allow-sftp-upload-file"
+description = "Enables the sftp_upload_file command"
+commands.allow = ["sftp_upload_file"]

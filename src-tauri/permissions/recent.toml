@@ -7,3 +7,8 @@ commands.allow = ["record_recent"]
 identifier = "allow-get-recents"
 description = "Enables the get_recents command."
 commands.allow = ["get_recents"]
+
+[[permission]]
+identifier = "allow-clear-recents"
+description = "Enables the clear_recents command."
+commands.allow = ["clear_recents"]

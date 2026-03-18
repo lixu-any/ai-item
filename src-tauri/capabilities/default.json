@@ -62,7 +62,16 @@
     "allow-get-system-fonts",
     "allow-record-recent",
     "allow-get-recents",
+    "allow-clear-recents",
     "allow-get-host-stats",
-    "allow-get-completions"
+    "allow-get-completions",
+    "allow-sftp-connect",
+    "allow-sftp-read-dir",
+    "allow-sftp-close",
+    "allow-sftp-mkdir",
+    "allow-sftp-delete",
+    "allow-sftp-rename",
+    "allow-sftp-download-file",
+    "allow-sftp-upload-file"
   ]
 }

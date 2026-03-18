@@ -12,12 +12,14 @@ mod pty;
 mod ai;
 mod fonts;
 mod completions;
+mod sftp;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(ssh::SessionPool(Default::default()))
         .manage(pty::PtySessionPool(Default::default()))
+        .manage(sftp::SftpPool(Default::default()))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
@@ -91,9 +93,19 @@ pub fn run() {
             db::import_data,
             db::record_recent,
             db::get_recents,
+            db::clear_recents,
             fonts::get_system_fonts,
             ssh::get_host_stats,
             completions::get_completions,
+            sftp::sftp_connect,
+            sftp::sftp_read_dir,
+            sftp::sftp_close,
+            sftp::sftp_mkdir,
+            sftp::sftp_delete,
+            sftp::sftp_rename,
+            sftp::sftp_download_file,
+            sftp::sftp_upload_file,
+            sftp::sftp_compress,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

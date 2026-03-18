@@ -670,3 +670,12 @@ pub async fn get_recents(app_handle: AppHandle) -> Result<Vec<Host>, String> {
     let hosts: Result<Vec<_>, _> = iter.map(|h| h.map_err(|e| e.to_string())).collect();
     hosts
 }
+
+/// 清空所有最近连接
+#[tauri::command]
+pub async fn clear_recents(app_handle: AppHandle) -> Result<(), String> {
+    let conn = get_conn(&app_handle)?;
+    conn.execute("DELETE FROM recent_connections", [])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}

@@ -13,6 +13,7 @@ import SvgIcon from "./components/SvgIcon.vue";
 import SettingsModal from "./components/SettingsModal.vue";
 import AiSidebar from "./components/AiSidebar.vue";
 import SessionPlayer from "./components/SessionPlayer.vue";
+import SftpBrowser from "./components/SftpBrowser.vue";
 
 interface SessionTab {
   id: string;
@@ -44,6 +45,15 @@ const sessions = ref<SessionTab[]>([]);
 const activeSessionId = ref<string | null>(null);
 const connecting = ref(false);
 const connError = ref("");
+const sessionViewMode = ref<Record<string, 'terminal' | 'sftp'>>({});
+
+function getSessionViewMode(id: string) {
+  return sessionViewMode.value[id] || 'terminal';
+}
+
+function setSessionViewMode(id: string, mode: 'terminal' | 'sftp') {
+  sessionViewMode.value[id] = mode;
+}
 
 const savedHosts = ref<Host[]>([]);
 const groups = ref<Group[]>([]);
@@ -61,8 +71,19 @@ const recentHosts = ref<Host[]>([]);
 
 async function loadRecents() {
   try {
-    recentHosts.value = await invoke<Host[]>('get_recents');
+    const res = await invoke<Host[]>('get_recents');
+    recentHosts.value = res.slice(0, 3);
   } catch { /* 静默失败 */ }
+}
+
+async function clearRecents() {
+  try {
+    await invoke('clear_recents');
+    recentHosts.value = [];
+    showToast('已清空最近连接');
+  } catch (err) {
+    showToast('清空最近连接失败: ' + err, 'error');
+  }
 }
 
 const toasts = ref<{id: number, message: string, type: 'success' | 'error'}[]>([]);
@@ -965,7 +986,12 @@ async function saveWindowSize() {
 
       <!-- 最近连接 -->
       <div v-if="recentHosts.length > 0 && !searchQuery" class="recent-section">
-        <div class="recent-header">最近连接</div>
+        <div class="recent-header">
+          <span>最近连接</span>
+          <button class="clear-recent-btn" @click="clearRecents" title="清空最近连接">
+            <SvgIcon name="close" size="12" /> 清空
+          </button>
+        </div>
         <div
           v-for="h in recentHosts"
           :key="`recent-${h.id}`"
@@ -1157,6 +1183,20 @@ async function saveWindowSize() {
             <SvgIcon name="close" size="12" class="close-icon" @click.stop="closeSession(session.id)" />
           </div>
         </div>
+        <div class="top-bar-actions" v-if="activeSessionId && sessions.find(s => s.id === activeSessionId)?.type === 'ssh'" style="margin-left:auto; display:flex; align-items:center; padding-right:16px;">
+          <div class="view-toggle" style="display:flex; background:rgba(128,128,128,0.1); border-radius:6px; padding:3px; gap:2px;">
+            <button 
+              style="border:none; padding:4px 14px; border-radius:4px; font-size:12px; font-weight:500; cursor:pointer; transition:all 0.2s;"
+              :style="getSessionViewMode(activeSessionId) === 'terminal' ? 'background:var(--bg-main, #fff);color:var(--text-main, #333);box-shadow:0 1px 3px rgba(0,0,0,0.1);' : 'background:transparent;color:var(--text-muted, #777);'"
+              @click="setSessionViewMode(activeSessionId, 'terminal')"
+            >终端</button>
+            <button 
+              style="border:none; padding:4px 14px; border-radius:4px; font-size:12px; font-weight:500; cursor:pointer; transition:all 0.2s;"
+              :style="getSessionViewMode(activeSessionId) === 'sftp' ? 'background:var(--bg-main, #fff);color:var(--text-main, #333);box-shadow:0 1px 3px rgba(0,0,0,0.1);' : 'background:transparent;color:var(--text-muted, #777);'"
+              @click="setSessionViewMode(activeSessionId, 'sftp')"
+            >文件</button>
+          </div>
+        </div>
         <!-- 广播按钮 -->
         <div class="top-bar-extra">
           <button
@@ -1220,19 +1260,28 @@ async function saveWindowSize() {
         </div>
         <div class="main-terminal-area">
           <template v-for="session in sessions" :key="session.id">
-            <Terminal 
-              v-if="session.type !== 'player'"
-              v-show="activeSessionId === session.id"
-              :ref="(el: any) => setTerminalRef(session.id, el)"
-              :session-id="session.id" 
-              :is-active="activeSessionId === session.id"
-              :type="(session.type as 'ssh' | 'local')"
-            />
-            <SessionPlayer
-              v-else
-              v-show="activeSessionId === session.id"
-              :file-path="session.filePath!"
-            />
+            <div style="width: 100%; height: 100%; position: relative;" v-show="activeSessionId === session.id">
+              <Terminal 
+                v-if="session.type !== 'player'"
+                v-show="getSessionViewMode(session.id) === 'terminal'"
+                :ref="(el: any) => setTerminalRef(session.id, el)"
+                :session-id="session.id" 
+                :is-active="activeSessionId === session.id && getSessionViewMode(session.id) === 'terminal'"
+                :type="(session.type as 'ssh' | 'local')"
+              />
+              <SftpBrowser
+                v-if="session.type === 'ssh'"
+                v-show="getSessionViewMode(session.id) === 'sftp'"
+                :session-id="session.id"
+                :host="session.host!"
+                :is-active="activeSessionId === session.id && getSessionViewMode(session.id) === 'sftp'"
+                @toast="(t: any) => showToast(t.message, t.type)"
+              />
+              <SessionPlayer
+                v-if="session.type === 'player'"
+                :file-path="session.filePath!"
+              />
+            </div>
           </template>
         </div>
       </div>
@@ -1879,10 +1928,18 @@ body, html, #app {
   margin-bottom: 6px;
 }
 .recent-header {
+  display: flex; justify-content: space-between; align-items: center;
   font-size: 10px; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.06em; color: var(--text-dim); padding: 6px 4px 4px;
-  opacity: 0.7;
 }
+.recent-header span { opacity: 0.7; }
+.clear-recent-btn {
+  background: transparent; border: none; color: inherit;
+  font-size: 10px; cursor: pointer; display: flex; align-items: center; gap: 3px;
+  opacity: 0.5; transition: all 0.2s; padding: 2px 4px; border-radius: 4px; margin-right: -4px;
+}
+.clear-recent-btn:hover { opacity: 1; color: var(--accent-color); background: rgba(0,0,0,0.05); }
+.dark-theme .clear-recent-btn:hover { background: rgba(255,255,255,0.1); }
 .recent-item {
   display: flex; align-items: center; gap: 8px;
   padding: 5px 6px; border-radius: 8px; cursor: pointer; transition: background 0.15s;
@@ -1892,9 +1949,11 @@ body, html, #app {
 .recent-avatar { width: 28px; height: 28px; border-radius: 7px; font-size: 10px; }
 .recent-connect-btn {
   opacity: 0; background: var(--accent-color); border: none; border-radius: 6px;
-  width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
-  cursor: pointer; color: white; transition: opacity 0.15s; flex-shrink: 0;
+  width: 0; height: 22px; display: flex; align-items: center; justify-content: center;
+  cursor: pointer; color: white; transition: all 0.2s ease; flex-shrink: 0;
+  overflow: hidden; padding: 0;
 }
+.recent-item:hover .recent-connect-btn { opacity: 1; width: 22px; }
 
 .group-content {
   margin-left: 20px;
@@ -1930,7 +1989,6 @@ body, html, #app {
   position: relative;
 }
 .host-card:hover { background: var(--sidebar-hover); transform: translateX(2px); }
-.host-card:hover .host-actions { opacity: 1; pointer-events: all; }
 .group-header:hover .group-name { color: var(--text-main); }
 
 /* 分组主机计数角标 */
@@ -1964,9 +2022,16 @@ body, html, #app {
 .host-name { font-size: 0.83rem; font-weight: 600; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .host-addr { font-size: 0.65rem; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.7; }
 
-/* hide actions by default, show on hover */
-.host-actions { display: flex; gap: 4px; opacity: 0; pointer-events: none; transition: opacity 0.15s; flex-shrink: 0; }
-.host-item:hover .host-actions { opacity: 1; }
+/* hide actions by default, show on hover and free up width */
+.host-actions { 
+  display: flex; gap: 4px; opacity: 0; pointer-events: none; 
+  transition: all 0.2s ease; flex-shrink: 0;
+  max-width: 0; overflow: hidden;
+}
+.host-item:hover .host-actions, .host-card:hover .host-actions { 
+  opacity: 1; pointer-events: all; 
+  max-width: 60px;
+}
 
 .icon-btn {
   background: none; border: none; padding: 3px; border-radius: 4px;

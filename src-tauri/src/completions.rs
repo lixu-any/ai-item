@@ -1,6 +1,5 @@
 use tauri::command;
 use std::fs;
-use std::io::{BufRead, BufReader};
 
 // 常见的基础命令 fallback list
 const COMMON_CMDS: &[&str] = &[
