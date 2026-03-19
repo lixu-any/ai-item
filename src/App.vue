@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick, onMounted } from "vue";
+import { ref, onMounted, nextTick, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { listen, emit } from "@tauri-apps/api/event";
@@ -14,6 +14,10 @@ import SettingsModal from "./components/SettingsModal.vue";
 import AiSidebar from "./components/AiSidebar.vue";
 import SessionPlayer from "./components/SessionPlayer.vue";
 import SftpBrowser from "./components/SftpBrowser.vue";
+import HostMonitor from "./components/HostMonitor.vue";
+import HostForm from "./components/HostForm.vue";
+import GroupForm from "./components/GroupForm.vue";
+import HostSidebar from "./components/HostSidebar.vue";
 
 interface SessionTab {
   id: string;
@@ -40,33 +44,16 @@ interface Host {
   password?: string | null;
   private_key?: string | null;
 }
-
-function formatUptime(rawStr: string | undefined): string {
-  if (!rawStr) return '-';
-  const match = rawStr.match(/up\s+(.*?)(,\s+\d+\s+user|,?\s+load average)/);
-  if (!match) return rawStr;
-  
-  let upStr = match[1].trim(); 
-  upStr = upStr.replace(/days?/g, '天');
-  upStr = upStr.replace(/min(utes?)?/g, '分钟');
-  upStr = upStr.replace(/hours?/g, '小时');
-  
-  upStr = upStr.replace(/(\d+):(\d+)/, (m, h, min) => {
-    return `${parseInt(h, 10)} 小时 ${parseInt(min, 10)} 分钟`;
-  });
-  
-  return upStr.replace(/,\s*/g, ' ');
-}
-
-function formatNetworkSpeed(bytes: number): string {
-  if (bytes === 0 || isNaN(bytes)) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-}
-
 const sessions = ref<SessionTab[]>([]);
+const activeHostIds = computed(() => {
+  const ids = new Set<number>();
+  sessions.value.forEach(s => {
+    if (s.type === 'ssh' && s.connected && s.host && s.host.id) {
+      ids.add(s.host.id);
+    }
+  });
+  return ids;
+});
 const activeSessionId = ref<string | null>(null);
 const connecting = ref(false);
 const connError = ref("");
@@ -89,9 +76,6 @@ const saveError = ref("");
 const deletingHostId = ref<number | null>(null);
 const authType = ref<'password' | 'private_key'>('password');
 const pkType = ref<'path' | 'content'>('path');
-const searchQuery = ref("");
-const collapsedGroups = ref<number[]>([]);
-const collapsedUnGrouped = ref(false);
 const recentHosts = ref<Host[]>([]);
 
 async function loadRecents() {
@@ -172,101 +156,11 @@ async function toggleRecording(sessionId: string, sessionTitle: string) {
 
 // ---- 主机监控快照 ----
 const showMonitor = ref(false);
-const monitorLoading = ref(false);
-const monitorHost = ref<Host | null>(null);
-interface TopProc {
-  pid: string;
-  cpu: string;
-  name: string;
-}
-
-interface MonitorStats {
-  os: string; hostname: string; uptimeRaw: string; load1: number;
-  cpuUsed: number;
-  memTotal: number; memUsed: number; memPct: number;
-  diskTotal: number; diskUsed: number; diskPct: number;
-  netRxBps?: number; netTxBps?: number;
-  top5Procs?: TopProc[];
-}
-const monitorStats = ref<MonitorStats | null>(null);
 let monitorSession: any = null;
-let monitorTimer: number | null = null;
-
-function parseKV(raw: string): Record<string, string> {
-  const kv: Record<string, string> = {};
-  for (const line of raw.split('\n')) {
-    const idx = line.indexOf('=');
-    if (idx > 0) kv[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
-  }
-  return kv;
-}
-
-async function doFetchStats(session: any, showSpinner: boolean) {
-  if (!session?.host || !showMonitor.value) return;
-  if (showSpinner) monitorLoading.value = true;
-  try {
-    const raw = await invoke<string>('get_host_stats', {
-      host: session.host.host, port: session.host.port,
-      username: session.host.username,
-      password: session.host.password || null,
-      privateKey: session.host.private_key || null,
-    });
-    if (!showMonitor.value) return;
-    const kv = parseKV(raw);
-    const num = (k: string) => parseFloat(kv[k] || '0') || 0;
-    const memTotal = num('MEM_TOTAL'), memUsed = num('MEM_USED');
-    const diskTotal = num('DISK_TOTAL'), diskUsed = num('DISK_USED');
-    const netRxBps = num('NET_RX_BPS');
-    const netTxBps = num('NET_TX_BPS');
-    
-    const top5Raw = kv['TOP5_PROCS'] || '';
-    const top5Procs: TopProc[] = top5Raw.split(';').filter(Boolean).map(item => {
-      const parts = item.split('|');
-      return { pid: parts[0] || '?', cpu: parts[1] || '0', name: parts[2] || '?' };
-    });
-
-    monitorStats.value = {
-      os: kv['OS'] || 'N/A',
-      hostname: kv['HOSTNAME'] || session.host.host,
-      uptimeRaw: kv['UPTIME_RAW'] || '',
-      load1: num('LOAD1'),
-      cpuUsed: num('CPU_USED'),
-      memTotal, memUsed,
-      memPct: memTotal > 0 ? Math.round(memUsed / memTotal * 100) : 0,
-      diskTotal, diskUsed,
-      diskPct: num('DISK_PCT'),
-      netRxBps,
-      netTxBps,
-      top5Procs
-    };
-  } catch (e: any) {
-    if (showMonitor.value) {
-      monitorStats.value = { os: `获取失败: ${e}`, hostname: '', uptimeRaw: '', load1: 0, cpuUsed: 0, memTotal: 0, memUsed: 0, memPct: 0, diskTotal: 0, diskUsed: 0, diskPct: 0 };
-    }
-  } finally {
-    if (showSpinner) monitorLoading.value = false;
-  }
-}
-
 async function openMonitor(session: any) {
   if (!session?.host) return;
   monitorSession = session;
   showMonitor.value = true;
-  monitorHost.value = session.host;
-  monitorStats.value = null;
-  
-  if (monitorTimer) window.clearInterval(monitorTimer);
-  
-  await doFetchStats(session, true);
-  
-  monitorTimer = window.setInterval(() => {
-    if (!showMonitor.value) {
-      if (monitorTimer) window.clearInterval(monitorTimer);
-      monitorTimer = null;
-      return;
-    }
-    doFetchStats(session, false);
-  }, 3000);
 }
 
 
@@ -512,53 +406,6 @@ const newHost = ref<Host>({
   private_key: '',
   group_id: null,
 });
-
-const filteredHosts = () => {
-  if (!searchQuery.value) return savedHosts.value;
-  const q = searchQuery.value.toLowerCase();
-  return savedHosts.value.filter(h => 
-    h.name.toLowerCase().includes(q) || 
-    h.host.toLowerCase().includes(q) ||
-    h.username.toLowerCase().includes(q)
-  );
-};
-
-function toggleGroup(groupId: number) {
-  const index = collapsedGroups.value.indexOf(groupId);
-  if (index > -1) {
-    collapsedGroups.value.splice(index, 1);
-  } else {
-    collapsedGroups.value.push(groupId);
-  }
-}
-
-function isGroupCollapsed(groupId: number) {
-  return collapsedGroups.value.includes(groupId);
-}
-
-function isHostActive(host: Host) {
-  return sessions.value.some(s => s.type === 'ssh' && s.host?.id === host.id);
-}
-
-// 根据字符串生成固定的 HSL 颜色
-function hostAvatarColor(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
-  const h = Math.abs(hash) % 360;
-  return `hsl(${h}, 55%, 48%)`;
-}
-// 取主机名首字母（至多2个）
-function hostAvatarText(name: string): string {
-  const words = name.trim().split(/[\s\-_\.]+/);
-  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
-  return name.slice(0, 2).toUpperCase();
-}
-// 分组内主机数
-function groupHostCount(groupId: number | null): number {
-  return groupId === null
-    ? savedHosts.value.filter(h => !h.group_id).length
-    : savedHosts.value.filter(h => h.group_id === groupId).length;
-}
 
 
 async function loadHosts() {
@@ -1113,19 +960,7 @@ async function handleTabMenuAction(action: string) {
 
 // 移除 splitPane 函数
 
-function onDragStart(event: DragEvent, hostId: number) {
-  if (event.dataTransfer) {
-    event.dataTransfer.setData("hostId", hostId.toString());
-    event.dataTransfer.effectAllowed = "move";
-  }
-}
-
-async function onDrop(event: DragEvent, groupId: number | null) {
-  event.preventDefault();
-  const hostIdStr = event.dataTransfer?.getData("hostId");
-  if (!hostIdStr) return;
-  
-  const hostId = parseInt(hostIdStr);
+async function onDrop(hostId: number, groupId: number | null) {
   const host = savedHosts.value.find(h => h.id === hostId);
   if (host && host.group_id !== groupId) {
     try {
@@ -1155,20 +990,6 @@ async function cancelForm() {
   }
 }
 
-async function selectPrivateKeyFile() {
-  try {
-    const selected = await open({
-      multiple: false,
-      directory: false,
-      title: '选择私钥文件',
-    });
-    if (selected) {
-      newHost.value.private_key = selected as string;
-    }
-  } catch (err) {
-    showToast("选择文件失败: " + err, "error");
-  }
-}
 
 async function saveWindowSize() {
   try {
@@ -1185,191 +1006,29 @@ async function saveWindowSize() {
 <template>
   <!-- Main Application Mode -->
   <div v-if="viewMode === 'main'" class="app-layout">
-    <aside class="sidebar">
-      <div class="sidebar-header">
-        <span class="sidebar-title">主机列表</span>
-        <div class="header-actions">
-          <button class="add-btn primary" @click="openAddGroupModal" title="添加分组">
-            <SvgIcon name="group" size="14" />
-          </button>
-          <button class="add-btn accent" @click="openAddModal" title="添加主机">
-            <SvgIcon name="add" size="14" />
-          </button>
-        </div>
-      </div>
-      
-      <div class="search-container">
-        <div class="search-input-wrapper">
-          <span class="search-icon">🔍</span>
-          <input v-model="searchQuery" placeholder="搜索名称 / IP / 用户..." />
-          <span v-if="searchQuery" class="clear-search" @click="searchQuery = ''">×</span>
-        </div>
-      </div>
-
-      <!-- 最近连接 -->
-      <div v-if="recentHosts.length > 0 && !searchQuery" class="recent-section">
-        <div class="recent-header">
-          <span>最近连接</span>
-          <button class="clear-recent-btn" @click="clearRecents" title="清空最近连接">
-            <SvgIcon name="close" size="12" /> 清空
-          </button>
-        </div>
-        <div
-          v-for="h in recentHosts"
-          :key="`recent-${h.id}`"
-          class="recent-item"
-          @click="connectToHost(h)"
-          :title="`双击连接 ${h.name}`"
-        >
-          <div class="host-avatar recent-avatar" :style="{ background: hostAvatarColor(h.name) }">
-            {{ hostAvatarText(h.name) }}
-            <span v-if="isHostActive(h)" class="avatar-online"></span>
-          </div>
-          <div class="host-meta">
-            <span class="host-name">{{ h.name }}</span>
-            <span class="host-addr">{{ h.username }}@{{ h.host }}</span>
-          </div>
-          <button class="recent-connect-btn" @click.stop="connectToHost(h)" title="连接">
-            <SvgIcon name="play" size="12" />
-          </button>
-        </div>
-      </div>
-
-      <div class="host-list">
-        <!-- 渲染分组及其主机 -->
-        <div v-for="g in groups" :key="g.id!" 
-          v-show="!searchQuery || filteredHosts().some(h => h.group_id === g.id)"
-          class="group-section"
-          :class="{ collapsed: isGroupCollapsed(g.id!) }"
-          @dragover.prevent
-          @drop="onDrop($event, g.id!)"
-        >
-          <div class="group-header" @click="toggleGroup(g.id!)">
-            <span class="chevron">›</span>
-            <SvgIcon name="group" size="15" class="folder-icon" />
-            <span class="group-name">{{ g.name }}</span>
-            <div class="group-actions">
-              <button class="icon-btn" @click.stop="editGroup(g)" title="编辑分组">
-                <SvgIcon name="edit" size="13" />
-              </button>
-              <button class="icon-btn delete-btn" @click.stop="deleteGroup(g.id!)" title="删除分组">
-                <SvgIcon name="delete" size="13" />
-              </button>
-            </div>
-            <span class="group-count">{{ groupHostCount(g.id!) }}</span>
-          </div>
-          <div class="group-content" v-show="!isGroupCollapsed(g.id!) || searchQuery">
-            <div
-              v-for="h in filteredHosts().filter((h: Host) => h.group_id === g.id)"
-              :key="h.id!"
-              class="host-card"
-              @dblclick="connectToHost(h)"
-              draggable="true"
-              @dragstart="onDragStart($event, h.id!)"
-            >
-              <div class="host-avatar" :style="{ background: hostAvatarColor(h.name) }">
-                {{ hostAvatarText(h.name) }}
-                <span v-if="isHostActive(h)" class="avatar-online"></span>
-              </div>
-              <div class="host-meta">
-                <span class="host-name">{{ h.name }}</span>
-                <span class="host-addr">{{ h.username }}@{{ h.host }}</span>
-              </div>
-              <div class="host-actions">
-                <button class="icon-btn" @click.stop="connectToHost(h)" title="连接">
-                  <SvgIcon name="play" size="13" />
-                </button>
-                <button class="icon-btn" @click.stop="editHost(h)" title="编辑">
-                  <SvgIcon name="edit" size="13" />
-                </button>
-                <button class="icon-btn delete-btn" @click.stop="deleteHost(h.id!)" title="删除">
-                  <SvgIcon name="delete" size="13" />
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 未分组主机 -->
-        <div v-if="filteredHosts().some(h => !h.group_id)" class="group-section"
-          :class="{ collapsed: collapsedUnGrouped }"
-          @dragover.prevent
-          @drop="onDrop($event, null)"
-        >
-          <div class="group-header" @click="collapsedUnGrouped = !collapsedUnGrouped">
-            <span class="chevron">›</span>
-            <SvgIcon name="group" size="15" class="folder-icon" />
-            <span class="group-name">未分组</span>
-            <span class="group-count">{{ groupHostCount(null) }}</span>
-          </div>
-          <div class="group-content" v-show="!collapsedUnGrouped || searchQuery">
-            <div
-              v-for="h in filteredHosts().filter((h: Host) => !h.group_id)"
-              :key="h.id!"
-              class="host-card"
-              @dblclick="connectToHost(h)"
-              draggable="true"
-              @dragstart="onDragStart($event, h.id!)"
-            >
-              <div class="host-avatar" :style="{ background: hostAvatarColor(h.name) }">
-                {{ hostAvatarText(h.name) }}
-                <span v-if="isHostActive(h)" class="avatar-online"></span>
-              </div>
-              <div class="host-meta">
-                <span class="host-name">{{ h.name }}</span>
-                <span class="host-addr">{{ h.username }}@{{ h.host }}</span>
-              </div>
-              <div class="host-actions">
-                <button class="icon-btn" @click.stop="connectToHost(h)" title="连接">
-                  <SvgIcon name="play" size="13" />
-                </button>
-                <button class="icon-btn" @click.stop="editHost(h)" title="编辑">
-                  <SvgIcon name="edit" size="13" />
-                </button>
-                <button class="icon-btn delete-btn" @click.stop="deleteHost(h.id!)" title="删除">
-                  <SvgIcon name="delete" size="13" />
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="filteredHosts().length === 0 && searchQuery" class="empty-state">
-          <SvgIcon name="search" size="48" class="empty-icon" />
-          <p>没有找到匹配的主机</p>
-        </div>
-        <div v-else-if="savedHosts.length === 0" class="empty-state">
-          <SvgIcon name="host" size="48" class="empty-icon" />
-          <p>点击上方 + 开始添加第一台服务器</p>
-        </div>
-      </div>
-      <div class="sidebar-footer">
-        <div class="footer-item" @click="newLocalTerminal" title="本地终端">
-          <SvgIcon name="host" size="18" class="footer-icon" />
-          <span>本地终端</span>
-        </div>
-        <div class="footer-item" @click="showSnippetSidebar = !showSnippetSidebar" :class="{ active: showSnippetSidebar }" title="命令片段">
-          <SvgIcon name="snippet" size="18" class="footer-icon" />
-          <span>命令片段</span>
-        </div>
-        <div class="footer-item" @click="showAiSidebar = !showAiSidebar" :class="{ active: showAiSidebar }" title="AI 助手">
-          <SvgIcon name="ai" size="18" class="footer-icon" />
-          <span>AI 助手</span>
-        </div>
-        <div class="footer-item" title="凭据管理" @click="openCredentialWindow">
-          <SvgIcon name="credential" size="18" class="footer-icon" />
-          <span>凭据中心</span>
-        </div>
-        <div class="footer-item" title="本地录像" @click="openRecordingFile">
-          <SvgIcon name="play" size="18" class="footer-icon" />
-          <span>播放回放</span>
-        </div>
-        <div class="footer-item" title="设置" @click="openSettingsWindow">
-          <SvgIcon name="settings" size="18" class="footer-icon" />
-          <span>设置</span>
-        </div>
-      </div>
-    </aside>
+    <HostSidebar
+      :hosts="savedHosts"
+      :groups="groups"
+      :recent-hosts="recentHosts"
+      :active-host-ids="activeHostIds"
+      :show-snippet-sidebar="showSnippetSidebar"
+      :show-ai-sidebar="showAiSidebar"
+      @add-group="openAddGroupModal"
+      @add-host="openAddModal"
+      @edit-group="editGroup"
+      @delete-group="deleteGroup"
+      @connect="connectToHost"
+      @edit-host="editHost"
+      @delete-host="deleteHost"
+      @clear-recent="clearRecents"
+      @drop-host="onDrop"
+      @new-local="newLocalTerminal"
+      @toggle-snippet="showSnippetSidebar = !showSnippetSidebar"
+      @toggle-ai="showAiSidebar = !showAiSidebar"
+      @open-credential="openCredentialWindow"
+      @open-recording="openRecordingFile"
+      @open-settings="openSettingsWindow"
+    />
     <main class="main-content">
       <header class="top-bar" :class="{ 'broadcast-on': broadcastMode }">
         <div v-if="sessions.length === 0" class="no-tabs">未连接</div>
@@ -1515,277 +1174,37 @@ async function saveWindowSize() {
   </div>
 
   <!-- 监控快照 Modal -->
-  <div v-if="showMonitor" class="monitor-overlay" @click.self="showMonitor = false">
-    <div class="monitor-modal">
-      <!-- Header -->
-      <div class="monitor-header">
-        <div class="monitor-title-area">
-          <div class="monitor-icon-wrap">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="20" height="20"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/><polyline points="6 9 10 13 14 8 18 12"/></svg>
-          </div>
-          <div>
-            <div class="monitor-modal-title">主机监控</div>
-            <div class="monitor-modal-sub" v-if="monitorStats">
-              {{ monitorStats.hostname }} · {{ monitorStats.os }}
-            </div>
-          </div>
-        </div>
-        <button class="monitor-close" @click="showMonitor = false">×</button>
-      </div>
-
-      <!-- Loading -->
-      <div v-if="monitorLoading" class="monitor-loading">
-        <div class="monitor-spinner"></div>
-        <span>正在连接并采集数据...</span>
-      </div>
-
-      <!-- Dashboard -->
-      <div v-else-if="monitorStats" class="monitor-dash">
-        <!-- Row 1: CPU + Uptime -->
-        <div class="dash-row">
-          <!-- CPU Gauge -->
-          <div class="dash-card dash-cpu">
-            <div class="dash-card-label">CPU 使用率</div>
-            <div class="cpu-gauge-wrap">
-              <svg class="cpu-gauge" viewBox="0 0 120 80" width="120" height="80">
-                <!-- Background arc -->
-                <path d="M 15 75 A 50 50 0 0 1 105 75" fill="none" stroke="#e8edff" stroke-width="10" stroke-linecap="round"/>
-                <!-- Value arc -->
-                <path
-                  d="M 15 75 A 50 50 0 0 1 105 75"
-                  fill="none"
-                  :stroke="monitorStats.cpuUsed > 80 ? '#ef4444' : monitorStats.cpuUsed > 60 ? '#f59e0b' : '#6366f1'"
-                  stroke-width="10"
-                  stroke-linecap="round"
-                  :stroke-dasharray="`${monitorStats.cpuUsed * 1.571} 157.1`"
-                />
-                <text x="60" y="68" text-anchor="middle" font-size="20" font-weight="800" :fill="monitorStats.cpuUsed > 80 ? '#ef4444' : '#1a1a2e'">{{ monitorStats.cpuUsed.toFixed(1) }}%</text>
-              </svg>
-            </div>
-            <div class="cpu-gauge-hint">1分钟负载: <strong>{{ monitorStats.load1 }}</strong></div>
-          </div>
-
-          <!-- Uptime / Info -->
-          <div class="dash-card dash-info">
-            <div class="dash-card-label">运行时长</div>
-            <div class="uptime-text">{{ formatUptime(monitorStats.uptimeRaw) }}</div>
-          </div>
-        </div>
-
-        <!-- Row 2: Memory + Disk -->
-        <div class="dash-row">
-          <!-- Memory -->
-          <div class="dash-card">
-            <div class="dash-card-label">
-              内存
-              <span class="dash-pct-badge" :class="{ warn: monitorStats.memPct > 80 }">{{ monitorStats.memPct }}%</span>
-            </div>
-            <div class="bar-wrap">
-              <div class="bar-bg">
-                <div
-                  class="bar-fill"
-                  :class="{ 'bar-warn': monitorStats.memPct > 80 }"
-                  :style="{ width: monitorStats.memPct + '%' }"
-                ></div>
-              </div>
-            </div>
-            <div class="bar-meta">
-              <span>已用 {{ (monitorStats.memUsed / 1024).toFixed(1) }} GB</span>
-              <span>共 {{ (monitorStats.memTotal / 1024).toFixed(1) }} GB</span>
-            </div>
-          </div>
-
-          <!-- Disk -->
-          <div class="dash-card">
-            <div class="dash-card-label">
-              磁盘 (/)
-              <span class="dash-pct-badge" :class="{ warn: monitorStats.diskPct > 80 }">{{ monitorStats.diskPct }}%</span>
-            </div>
-            <div class="bar-wrap">
-              <div class="bar-bg">
-                <div
-                  class="bar-fill bar-disk"
-                  :class="{ 'bar-warn': monitorStats.diskPct > 80 }"
-                  :style="{ width: monitorStats.diskPct + '%' }"
-                ></div>
-              </div>
-            </div>
-            <div class="bar-meta">
-              <span>已用 {{ (monitorStats.diskUsed / 1024).toFixed(1) }} GB</span>
-              <span>共 {{ (monitorStats.diskTotal / 1024).toFixed(1) }} GB</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Row 3: Network + Top Processes -->
-        <div class="dash-row">
-          <!-- Network -->
-          <div class="dash-card">
-            <div class="dash-card-label">实时网速</div>
-            <div class="net-stats">
-              <div class="net-item">
-                <span class="net-icon tx">↑</span>
-                <span class="net-value">{{ formatNetworkSpeed(monitorStats.netTxBps || 0) }}/s</span>
-              </div>
-              <div class="net-item">
-                <span class="net-icon rx">↓</span>
-                <span class="net-value">{{ formatNetworkSpeed(monitorStats.netRxBps || 0) }}/s</span>
-              </div>
-            </div>
-          </div>
-          
-          <!-- Top CPU Processes -->
-          <div class="dash-card dash-procs">
-            <div class="dash-card-label">最高能耗进程 (TOP 5)</div>
-            <div class="proc-list" v-if="monitorStats.top5Procs && monitorStats.top5Procs.length">
-              <div class="proc-header">
-                <span style="width: 60px">PID</span>
-                <span style="flex: 1; padding-left: 8px">COMMAND</span>
-                <span style="width: 55px; text-align: right">%CPU</span>
-              </div>
-              <div class="proc-item" v-for="p in monitorStats.top5Procs" :key="p.pid">
-                <span class="proc-pid">{{ p.pid }}</span>
-                <span class="proc-name" :title="p.name">{{ p.name }}</span>
-                <span class="proc-cpu">{{ p.cpu }}%</span>
-              </div>
-            </div>
-            <div v-else class="proc-empty">暂无数据 / 权限不足</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="monitor-footer">
-        <button class="monitor-refresh-btn" @click="openMonitor(monitorSession)" :disabled="monitorLoading">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
-          刷新数据
-        </button>
-      </div>
-    </div>
-  </div>
-
+  <HostMonitor v-if="showMonitor" :session="monitorSession" @close="showMonitor = false" />
 
   <!-- Standalone Form / Modal -->
   <div v-if="viewMode !== 'main' || showAddModal || showGroupModal" 
     :class="viewMode === 'main' ? 'modal-overlay' : 'standalone-page'">
     
-    <!-- Host Form -->
-    <div v-if="viewMode === 'add-host' || viewMode === 'edit-host' || showAddModal" 
-      class="modal-content" :class="{ 'premium-modal': isEditing, 'standalone-window': viewMode !== 'main' }">
-      <div class="modal-header-accent"></div>
-      <div class="form-header">
-        <SvgIcon :name="isEditing ? 'edit' : 'add'" size="20" class="header-icon" />
-        <h3>{{ isEditing ? '编辑主机配置' : '添加新主机' }}</h3>
-        <button class="use-cred-btn" @click="viewMode !== 'main' ? openCredentialPicker() : (showCredentialManager = true)">复用凭据</button>
-      </div>
-      
-      <div class="form-scroll-area">
-        <div class="form-grid">
-          <div class="form-group animate-in" style="--delay: 0.1s">
-            <label>标识名称</label>
-            <input v-model="newHost.name" placeholder="e.g. 生产环境-Web01" autofocus />
-          </div>
-          
-          <div class="form-row animate-in" style="--delay: 0.2s">
-            <div class="form-group flex-2">
-              <label>主机地址 (IP/Domain)</label>
-              <input v-model="newHost.host" placeholder="192.168.1.100" />
-            </div>
-            <div class="form-group flex-1">
-              <label>端口</label>
-              <input v-model.number="newHost.port" type="number" />
-            </div>
-          </div>
+    <HostForm
+      v-if="viewMode === 'add-host' || viewMode === 'edit-host' || showAddModal"
+      v-model="newHost"
+      v-model:authTypeRef="authType"
+      v-model:pkTypeRef="pkType"
+      :is-editing="isEditing"
+      :groups="groups"
+      :save-error="saveError"
+      :is-standalone="viewMode !== 'main'"
+      @save="saveHost"
+      @cancel="cancelForm"
+      @use-credential="viewMode !== 'main' ? openCredentialPicker() : (showCredentialManager = true)"
+    />
 
-          <div class="form-group animate-in" style="--delay: 0.3s">
-            <label>业务分组</label>
-            <select v-model="newHost.group_id" class="group-select">
-              <option :value="null">未分组 (Default)</option>
-              <option v-for="g in groups" :key="g.id!" :value="g.id">{{ g.name }}</option>
-            </select>
-          </div>
+    <GroupForm
+      v-if="viewMode === 'add-group' || viewMode === 'edit-group' || showGroupModal"
+      v-model="newGroup"
+      :is-editing="isEditing"
+      :save-error="saveError"
+      :is-standalone="viewMode !== 'main'"
+      @save="saveGroup"
+      @cancel="cancelForm"
+    />
 
-          <div class="form-group animate-in" style="--delay: 0.4s">
-            <label>SSH 用户名</label>
-            <input v-model="newHost.username" placeholder="root" />
-          </div>
-
-          <div class="form-group animate-in" style="--delay: 0.5s">
-            <label>认证方式</label>
-            <div class="auth-tabs">
-              <div class="auth-tab" :class="{ active: authType === 'password' }" @click="authType = 'password'">
-                <SvgIcon name="credential" size="14" />
-                <span>密码认证</span>
-              </div>
-              <div class="auth-tab" :class="{ active: authType === 'private_key' }" @click="authType = 'private_key'">
-                <SvgIcon name="snippet" size="14" />
-                <span>私钥认证</span>
-              </div>
-            </div>
-          </div>
-
-          <div v-if="authType === 'password'" class="form-group animate-in" style="--delay: 0.6s">
-            <label>登录密码</label>
-            <input v-model="newHost.password" type="password" placeholder="••••••••" />
-          </div>
-          
-          <div v-else class="form-group animate-in" style="--delay: 0.6s">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <label>私钥认证</label>
-              <div class="pk-toggle">
-                <span :class="{ active: pkType === 'path' }" @click="pkType = 'path'">路径</span>
-                <span :class="{ active: pkType === 'content' }" @click="pkType = 'content'">直接粘贴</span>
-              </div>
-            </div>
-            <div v-if="pkType === 'path'" class="input-with-btn">
-              <input v-model="newHost.private_key" placeholder="~/.ssh/id_rsa" />
-              <button class="browse-btn" @click="selectPrivateKeyFile">浏览</button>
-            </div>
-            <textarea v-else v-model="newHost.private_key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..." rows="4" style="font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;"></textarea>
-          </div>
-        </div>
-      </div>
-
-      <div v-if="saveError" class="modal-error animate-in">{{ saveError }}</div>
-
-      <div class="modal-footer">
-        <button class="modal-btn secondary" @click="cancelForm">取消</button>
-        <button class="modal-btn primary" @click="saveHost">
-          {{ isEditing ? '更新配置' : '立即保存' }}
-        </button>
-      </div>
-    </div>
-
-    <!-- Group Form -->
-    <div v-if="viewMode === 'add-group' || viewMode === 'edit-group' || showGroupModal" 
-      class="modal-content" :class="{ 'standalone-window': viewMode !== 'main' }">
-      <!-- header (both modes) -->
-      <div class="form-header">
-        <SvgIcon :name="isEditing ? 'edit' : 'group'" size="20" class="header-icon" />
-        <h3>{{ isEditing ? '编辑业务分组' : '创建新分组' }}</h3>
-      </div>
-      
-      <div class="form-scroll-area">
-        <div v-if="viewMode !== 'main'" class="group-form-hint">
-          分组可帮助你组织和管理多台主机，例如按环境、地域画分。
-        </div>
-        <div class="form-grid">
-          <div class="form-group animate-in" style="--delay: 0.1s">
-            <label>分组名称</label>
-            <input v-model="newGroup.name" placeholder="e.g. 生产环境" @keyup.enter="saveGroup" autofocus />
-          </div>
-        </div>
-      </div>
-
-      <div v-if="saveError" class="modal-error animate-in">{{ saveError }}</div>
-
-      <div class="modal-footer">
-        <button class="modal-btn secondary" @click="cancelForm">取消</button>
-        <button class="modal-btn primary" @click="saveGroup">
-          {{ isEditing ? '更新分组' : '立即创建' }}
-        </button>
-      </div>
-    </div>
-        <div v-if="viewMode === 'settings'" class="modal-content standalone-window premium-modal" style="width: 100%; height: 100vh; border-radius: 0; padding: 0; background-color: var(--bg-main);">
+    <div v-if="viewMode === 'settings'" class="modal-content standalone-window premium-modal" style="width: 100%; height: 100vh; border-radius: 0; padding: 0; background-color: var(--bg-main);">
       <SettingsModal @close="cancelForm" @toast="(t: any) => showToast(t.message, t.type)" />
     </div>
 
