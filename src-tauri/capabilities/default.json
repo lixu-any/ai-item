@@ -72,6 +72,10 @@
     "allow-sftp-delete",
     "allow-sftp-rename",
     "allow-sftp-download-file",
-    "allow-sftp-upload-file"
+    "allow-sftp-upload-file",
+    "allow-sftp-extract",
+    "allow-sftp-copy",
+    "allow-sftp-compress",
+    "allow-sftp-exec"
   ]
 }

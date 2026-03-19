@@ -36,7 +36,7 @@
         </button>
       </div>
     </div>
-    <div class="sftp-content" @contextmenu.prevent="onEmptyContextMenu">
+    <div class="sftp-content" @click.self="onEmptyClick" @contextmenu.prevent="onEmptyContextMenu">
       <div v-if="loading" class="loading-overlay">正在加载...</div>
       <table class="file-table" v-else>
         <thead>
@@ -51,12 +51,11 @@
         </thead>
         <tbody>
           <tr v-if="currentPath !== '/'" class="file-action-row" @click="goUp"
-              @dragenter.prevent="dragOverDir = '..'"
-              @dragover.prevent="dragOverDir = '..'"
-              @dragleave.prevent="handleDragLeave($event)"
-              @drop.prevent.stop="onInternalDrop('..')"
+              data-isdir="true"
+              data-name=".."
               :class="{ 'drag-over': dragOverDir === '..' }"
-              style="cursor: pointer;">
+              style="cursor: pointer;"
+              @mouseup="onMouseDrop()">
             <td colspan="6">
               <span class="back-link" style="display:flex;align-items:center;gap:6px;color:#6366f1;font-weight:600;padding-left:4px">
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
@@ -64,18 +63,19 @@
               </span>
             </td>
           </tr>
-          <tr v-for="file in sortedFiles" :key="file.name" 
+          <tr v-for="(file, index) in sortedFiles" :key="file.name" 
               class="file-item"
-              :draggable="true"
-              @dragstart="onInternalDragStart($event, file)"
-              @dragend="onInternalDragEnd"
-              @dragenter.prevent="handleInternalDragEnter($event, file)"
-              @dragover.prevent="handleInternalDragEnter($event, file)"
-              @dragleave.prevent="handleDragLeave($event)"
-              @drop.prevent.stop="handleInternalDrop($event, file)"
-              :class="{ 'drag-over': dragOverDir === file.name }"
+              :data-isdir="String(file.is_dir)"
+              :data-name="file.name"
+              :class="{ 
+                'drag-over': dragOverDir === file.name, 
+                'is-dragging-source': draggedInternalFile?.name === file.name,
+                'selected': selectedFiles.has(file.name)
+              }"
+              @mousedown="onMousePickup($event, file, index)"
+              @mouseup="onMouseDrop()"
               @dblclick="handleDoubleClick(file)" 
-              @contextmenu.prevent.stop="onFileContextMenu($event, file)">
+              @contextmenu.prevent.stop="onFileContextMenu($event, file, index)">
             <td class="file-name-cell">
               <svg v-if="file.is_dir" class="file-icon folder" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
               <svg v-else class="file-icon file" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>
@@ -135,18 +135,39 @@
       </div>
     </div>
 
-    <!-- 传输进度条 -->
-    <div class="transfer-panel" v-if="Object.keys(activeTransfers).length > 0">
-      <div v-for="(task, file) in activeTransfers" :key="file" class="transfer-item">
+    <!-- Transfer and Batch Progress Panel -->
+    <div class="transfer-panel" v-if="Object.keys(activeTransfers).length > 0 || batchProgress">
+      <!-- Batch Operations (Copy, Delete, Compress, etc.) -->
+      <div v-if="batchProgress" class="transfer-item">
         <div class="transfer-info">
-          <span class="transfer-name" :title="String(file)">{{ file }} ({{ task.transfer_type === 'download' ? '下载' : '上传' }})</span>
+          <span class="transfer-name" :title="batchProgress.itemName">
+            {{ batchProgress.action }}: {{ batchProgress.itemName }}
+          </span>
+          <span class="transfer-size" v-if="batchProgress.total > 0">
+            {{ batchProgress.current }} / {{ batchProgress.total }}
+          </span>
+        </div>
+        <div class="progress-bar">
+          <div class="progress-fill" 
+               :class="{ 'indeterminate': batchProgress.total === 0 }"
+               :style="{ width: batchProgress.total > 0 ? `${(batchProgress.current / batchProgress.total) * 100}%` : '100%' }">
+          </div>
+        </div>
+        <!-- Divider if there are active network transfers below -->
+        <hr v-if="Object.keys(activeTransfers).length > 0" style="border:0;border-top:1px solid rgba(0,0,0,0.05);margin: 8px 0;" />
+      </div>
+
+      <!-- Active Network Transfers -->
+      <div v-for="t in activeTransfers" :key="t.file" class="transfer-item">
+        <div class="transfer-info">
+          <span class="transfer-name" :title="t.file">{{ t.file }} ({{ t.transfer_type === 'download' ? '下载' : '上传' }})</span>
           <div class="transfer-meta">
-            <span class="transfer-size">{{ formatSize(task.transferred) }} / {{ formatSize(task.total) }}</span>
-            <span class="transfer-percent">{{ task.total > 0 ? Math.round((task.transferred / task.total) * 100) : 0 }}%</span>
+            <span class="transfer-size">{{ formatSize(t.transferred) }} / {{ formatSize(t.total) }}</span>
+            <span class="transfer-percent">{{ t.total > 0 ? Math.round((t.transferred / t.total) * 100) : 0 }}%</span>
           </div>
         </div>
         <div class="progress-bar">
-          <div class="progress-fill" :style="{ width: (task.total > 0 ? (task.transferred / task.total) * 100 : 0) + '%' }"></div>
+          <div class="progress-fill" :style="{ width: (t.total > 0 ? (t.transferred / t.total) * 100 : 0) + '%' }"></div>
         </div>
       </div>
     </div>
@@ -178,6 +199,25 @@ interface FileMetadata {
   permissions: number | null;
 }
 
+interface TransferProgress {
+  session_id: string;
+  file: string;
+  transfer_type: string;
+  transferred: number;
+  total: number;
+}
+
+// Batch operation progress
+interface BatchProgress {
+  action: string;
+  current: number;
+  total: number;
+  itemName: string;
+}
+const batchProgress = ref<BatchProgress | null>(null);
+
+const activeTransfers = ref<Record<string, TransferProgress>>({});
+
 const props = defineProps<{
   sessionId: string;
   host: Host;
@@ -199,18 +239,26 @@ const isDraggingFile = ref(false);
 const draggedInternalFile = ref<FileMetadata | null>(null);
 const dragOverDir = ref<string | null>(null);
 
+// Clipboard for copy/cut/paste
+interface ClipboardItem {
+  files: FileMetadata[];
+  sourcePaths: string[]; // full paths of the source files
+  mode: 'copy' | 'cut';
+}
+const clipboard = ref<ClipboardItem | null>(null);
+
+const selectedFiles = ref<Set<string>>(new Set());
+const lastSelectedIdx = ref<number>(-1);
+
+// Clear selection when clicking empty space
+function onEmptyClick() {
+  selectedFiles.value.clear();
+  lastSelectedIdx.value = -1;
+}
+
 let unlistenDropHover: any = null;
 let unlistenDrop: any = null;
 let unlistenDropCancelled: any = null;
-
-interface TransferProgress {
-  session_id: string;
-  file: string;
-  transfer_type: 'download' | 'upload';
-  transferred: number;
-  total: number;
-}
-const activeTransfers = ref<Record<string, TransferProgress>>({});
 
 const isEditingPath = ref(false);
 const editPathValue = ref('');
@@ -224,35 +272,72 @@ const contextFile = ref<FileMetadata | null>(null);
 
 function onEmptyContextMenu(e: MouseEvent) {
   contextFile.value = null;
-  menuItems.value = [
+  selectedFiles.value.clear();
+  lastSelectedIdx.value = -1;
+  const mItems: MenuItem[] = [
     { label: '刷新', action: 'refresh' },
     { label: '新建文件夹', action: 'mkdir' },
     { label: '上传文件', action: 'upload' }
   ];
+  if (clipboard.value && clipboard.value.files.length > 0) {
+    mItems.push(
+      { divider: true },
+      { label: `粘贴 (${clipboard.value.files.length} 个项)`, action: 'paste' }
+    );
+  }
+  menuItems.value = mItems;
   menuX.value = e.clientX;
   menuY.value = e.clientY;
   showMenu.value = true;
 }
 
-function onFileContextMenu(e: MouseEvent, file: FileMetadata) {
-  contextFile.value = file;
-  const mItems: MenuItem[] = [
-    { label: '下载', action: 'download', disabled: file.is_dir }
-  ];
+function onFileContextMenu(e: MouseEvent, file: FileMetadata, index: number) {
+  // If the right-clicked file is not in the current selection, clear selection and select ONLY it.
+  if (!selectedFiles.value.has(file.name)) {
+    selectedFiles.value.clear();
+    selectedFiles.value.add(file.name);
+    lastSelectedIdx.value = index;
+  }
   
-  if (!file.is_dir) {
+  contextFile.value = file; // Still track where the click originated
+  const selectedCount = selectedFiles.value.size;
+
+  const mItems: MenuItem[] = [];
+  
+  // Only allow download if there are no directories in the selection
+  const selectedFilesList = sortedFiles.value.filter(f => selectedFiles.value.has(f.name));
+  const hasDir = selectedFilesList.some(f => f.is_dir);
+  
+  if (!hasDir) {
+    mItems.push({ label: `下载 (${selectedCount} 个项)`, action: 'download' });
+  }
+  
+  if (selectedCount === 1 && !file.is_dir) {
     const lowerName = file.name.toLowerCase();
     if (lowerName.endsWith('.zip') || lowerName.endsWith('.tar.gz') || lowerName.endsWith('.tgz') || lowerName.endsWith('.tar')) {
       mItems.push({ label: '解压到本目录', action: 'extract' });
     }
   }
   
+  mItems.push({ label: `压缩为 .tar.gz (${selectedCount} 个项)`, action: 'compress' });
+
   mItems.push(
-    { label: '压缩为 .tar.gz', action: 'compress' },
-    { label: '重命名', action: 'rename' },
     { divider: true },
-    { label: '删除', action: 'delete', danger: true }
+    { label: `复制 (${selectedCount} 个项)`, action: 'copy' },
+    { label: `剪切 (${selectedCount} 个项)`, action: 'cut' },
   );
+  if (clipboard.value && clipboard.value.files.length > 0) {
+    mItems.push({ label: `粘贴 (${clipboard.value.files.length} 个项)`, action: 'paste' });
+  }
+  mItems.push(
+    { divider: true }
+  );
+  
+  if (selectedCount === 1) {
+    mItems.push({ label: '重命名', action: 'rename' });
+  }
+  
+  mItems.push({ label: `删除 (${selectedCount} 个项)`, action: 'delete', danger: true });
 
   menuItems.value = mItems;
   menuX.value = e.clientX;
@@ -266,13 +351,17 @@ function handleMenuAction(action: string) {
     if (action === 'refresh') refresh();
     if (action === 'mkdir') mkdir();
     if (action === 'upload') uploadFile();
+    if (action === 'paste') pasteFile();
   } else {
     const file = contextFile.value;
-    if (action === 'download' && !file.is_dir) downloadFile(file);
+    if (action === 'download') downloadSelected();
     if (action === 'extract') extractFile(file);
-    if (action === 'compress') compressFile(file);
+    if (action === 'compress') compressSelected();
+    if (action === 'copy') copySelected();
+    if (action === 'cut') cutSelected();
+    if (action === 'paste') pasteFile();
     if (action === 'rename') renameFile(file);
-    if (action === 'delete') deleteFile(file);
+    if (action === 'delete') deleteSelected();
   }
 }
 
@@ -387,49 +476,120 @@ onUnmounted(async () => {
   }
 });
 
-function onInternalDragStart(e: DragEvent, file: FileMetadata) {
-  draggedInternalFile.value = file;
-  if (e.dataTransfer) {
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', file.name);
+// ========== Mouse-event based drag & move (bypasses Tauri DnD interception) ==========
+let isMouseDragging = false;
+
+function onMousePickup(e: MouseEvent, file: FileMetadata, index: number) {
+  // Handle Selection Logic First (only left click)
+  if (e.button === 0) {
+    const target = e.target as HTMLElement;
+    if (target.closest('.text-btn') || target.closest('.action-cell')) return;
+
+    if (e.shiftKey && lastSelectedIdx.value !== -1) {
+      // Range selection
+      const start = Math.min(lastSelectedIdx.value, index);
+      const end = Math.max(lastSelectedIdx.value, index);
+      selectedFiles.value.clear();
+      for (let i = start; i <= end; i++) {
+        selectedFiles.value.add(sortedFiles.value[i].name);
+      }
+      // Prevent text selection during shift click
+      document.getSelection()?.removeAllRanges();
+    } else if (e.ctrlKey || e.metaKey) {
+      // Toggle selection
+      if (selectedFiles.value.has(file.name)) {
+        selectedFiles.value.delete(file.name);
+      } else {
+        selectedFiles.value.add(file.name);
+        lastSelectedIdx.value = index;
+      }
+    } else {
+      // Single selection
+      selectedFiles.value.clear();
+      selectedFiles.value.add(file.name);
+      lastSelectedIdx.value = index;
+    }
   }
-}
 
-function onInternalDragEnd() {
-  draggedInternalFile.value = null;
-  dragOverDir.value = null;
-}
-
-function handleDragEnter(e: DragEvent, name: string) {
-  dragOverDir.value = name;
-}
-
-function handleInternalDragEnter(e: DragEvent, file: FileMetadata) {
-  if (file.is_dir) dragOverDir.value = file.name;
-}
-
-function handleDragLeave(e: DragEvent) {
-  const current = e.currentTarget as HTMLElement;
-  const related = e.relatedTarget as Node | null;
-  // If moving within the same TR row, ignore the leave event
-  if (!current.contains(related)) {
+  // Only left button for drag
+  if (e.button !== 0) return;
+  const target = e.target as HTMLElement;
+  if (target.closest('.text-btn') || target.closest('.action-cell')) return;
+  
+  // Use a short delay to distinguish click from drag intent
+  const startX = e.clientX;
+  const startY = e.clientY;
+  
+  const onMove = (me: MouseEvent) => {
+    const dx = me.clientX - startX;
+    const dy = me.clientY - startY;
+    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+      // Threshold exceeded - start dragging
+      if (!isMouseDragging) {
+        isMouseDragging = true;
+        draggedInternalFile.value = file;
+        document.body.style.cursor = 'grabbing';
+        document.body.style.userSelect = 'none';
+        document.body.style.webkitUserSelect = 'none';
+        window.getSelection()?.removeAllRanges();
+      }
+      // Track which row the mouse is over
+      const el = document.elementFromPoint(me.clientX, me.clientY) as HTMLElement;
+      if (el) {
+        const tr = el.closest('tr.file-item, tr.file-action-row') as HTMLElement;
+        if (tr) {
+          const isDir = tr.getAttribute('data-isdir') === 'true';
+          const name = tr.getAttribute('data-name');
+          if (isDir && name && name !== file.name) {
+            dragOverDir.value = name;
+          } else {
+            dragOverDir.value = null;
+          }
+        } else {
+          dragOverDir.value = null;
+        }
+      }
+    }
+  };
+  
+  const onUp = (me: MouseEvent) => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    document.body.style.webkitUserSelect = '';
+    
+    if (isMouseDragging && draggedInternalFile.value) {
+      // Find the target under cursor
+      const el = document.elementFromPoint(me.clientX, me.clientY) as HTMLElement;
+      const tr = el?.closest('tr.file-item, tr.file-action-row') as HTMLElement;
+      if (tr) {
+        const isDir = tr.getAttribute('data-isdir') === 'true';
+        const name = tr.getAttribute('data-name');
+        if (isDir && name && name !== draggedInternalFile.value.name) {
+          onInternalDrop(name);
+        }
+      }
+    }
+    
+    isMouseDragging = false;
+    draggedInternalFile.value = null;
     dragOverDir.value = null;
-  }
+  };
+  
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
 }
 
-async function handleInternalDrop(e: DragEvent, file: FileMetadata) {
-  if (!file.is_dir) {
-    showToast(`Drop failed: ${file.name} is not a directory`, 'error');
-    return;
-  }
-  await onInternalDrop(file.name);
+function onMouseDrop() {
+  // Handled by the document-level mouseup in onMousePickup
 }
 
 async function onInternalDrop(targetDirName: string) {
   dragOverDir.value = null;
   const file = draggedInternalFile.value;
   if (!file) {
-    showToast(`Drop failed: draggedInternalFile is null`, 'error');
+    showToast(`[调试] 降落失败: 没拿到源文件`, 'error');
     return;
   }
   draggedInternalFile.value = null;
@@ -589,6 +749,98 @@ async function mkdir() {
     showToast('新建失败: ' + err, 'error');
   }
 }
+// ========== Copy / Cut / Paste ==========
+function copySelected() {
+  const bp = currentPath.value.replace(/\/$/, '');
+  const filesToCopy = files.value.filter(f => selectedFiles.value.has(f.name));
+  const sourcePaths = filesToCopy.map(f => bp === '' ? `/${f.name}` : `${bp}/${f.name}`);
+  clipboard.value = { files: filesToCopy, sourcePaths, mode: 'copy' };
+  showToast(`已复制 ${filesToCopy.length} 个项`);
+}
+
+function cutSelected() {
+  const bp = currentPath.value.replace(/\/$/, '');
+  const filesToCut = files.value.filter(f => selectedFiles.value.has(f.name));
+  const sourcePaths = filesToCut.map(f => bp === '' ? `/${f.name}` : `${bp}/${f.name}`);
+  clipboard.value = { files: filesToCut, sourcePaths, mode: 'cut' };
+  showToast(`已剪切 ${filesToCut.length} 个项`);
+}
+
+async function pasteFile() {
+  if (!clipboard.value || !props.sessionId) return;
+  const { files: clipFiles, sourcePaths, mode } = clipboard.value;
+  const bp = currentPath.value.replace(/\/$/, '');
+  
+  const existingNames = new Set(files.value.map(f => f.name));
+  let successCount = 0;
+
+  batchProgress.value = {
+    action: mode === 'cut' ? '移动' : '复制',
+    current: 0,
+    total: clipFiles.length,
+    itemName: '准备中...'
+  };
+
+  for (let i = 0; i < clipFiles.length; i++) {
+    const file = clipFiles[i];
+    const sourcePath = sourcePaths[i];
+    
+    batchProgress.value.current = i;
+    batchProgress.value.itemName = file.name;
+    
+    // Auto-rename if duplicate exists
+    let finalName = file.name;
+    if (existingNames.has(finalName)) {
+      let counter = 1;
+      const dotIdx = finalName.lastIndexOf('.');
+      const hasExt = !file.is_dir && dotIdx > 0;
+      const baseName = hasExt ? finalName.slice(0, dotIdx) : finalName;
+      const ext = hasExt ? finalName.slice(dotIdx) : '';
+      while (existingNames.has(finalName)) {
+        finalName = `${baseName}_${counter}${ext}`;
+        counter++;
+      }
+    }
+    
+    const destPath = bp === '' ? `/${finalName}` : `${bp}/${finalName}`;
+    existingNames.add(finalName); // update for next iterations
+    
+    if (sourcePath === destPath) {
+      showToast(`忽略 ${file.name}: 源文件与目标路径相同`, 'error');
+      continue;
+    }
+
+    try {
+      if (mode === 'cut') {
+        await invoke('sftp_rename', {
+          sessionId: props.sessionId,
+          oldPath: sourcePath,
+          newPath: destPath,
+        });
+      } else {
+        await invoke('sftp_copy', {
+          sessionId: props.sessionId,
+          sourcePath,
+          destPath,
+        });
+      }
+      successCount++;
+    } catch (e: any) {
+      showToast(`操作失败 ${file.name}: ${e}`, 'error');
+    }
+  }
+  
+  batchProgress.value = null;
+  
+  if (mode === 'cut') {
+    clipboard.value = null;
+  }
+  
+  if (successCount > 0) {
+    showToast(`${mode === 'cut' ? '移动' : '复制'}完成, 成功 ${successCount}/${clipFiles.length} 项!`);
+    await refresh();
+  }
+}
 
 async function renameFile(file: FileMetadata) {
   const newName = await customPrompt('重命名为:', file.name);
@@ -604,35 +856,119 @@ async function renameFile(file: FileMetadata) {
   }
 }
 
-async function deleteFile(file: FileMetadata) {
-  if (!(await customConfirm(`确定要删除 ${file.name} 吗？`))) return;
+async function deleteSelected() {
+  const count = selectedFiles.value.size;
+  if (count === 0) return;
+  if (!(await customConfirm(`确定要删除选中的 ${count} 个项吗？\n删除后不可恢复！`))) return;
   if (!props.sessionId) return;
-  const targetPath = currentPath.value.endsWith('/') ? `${currentPath.value}${file.name}` : `${currentPath.value}/${file.name}`;
-  try {
-    await invoke('sftp_delete', { sessionId: props.sessionId, path: targetPath, isDir: file.is_dir });
-    showToast('删除成功');
+  
+  let successCount = 0;
+  const nameArray = Array.from(selectedFiles.value);
+  
+  batchProgress.value = { action: '删除', current: 0, total: count, itemName: '准备中...' };
+  
+  for (let i = 0; i < nameArray.length; i++) {
+    const name = nameArray[i];
+    const file = files.value.find(f => f.name === name);
+    if (!file) continue;
+    
+    batchProgress.value.current = i;
+    batchProgress.value.itemName = file.name;
+    
+    const targetPath = currentPath.value.endsWith('/') ? `${currentPath.value}${file.name}` : `${currentPath.value}/${file.name}`;
+    try {
+      await invoke('sftp_delete', { sessionId: props.sessionId, path: targetPath, isDir: file.is_dir });
+      successCount++;
+    } catch (err: any) {
+      showToast(`删除失败 ${file.name}: ${err}`, 'error');
+    }
+  }
+  
+  batchProgress.value = null;
+  
+  if (successCount > 0) {
+    showToast(`成功删除 ${successCount}/${count} 项`);
+    selectedFiles.value.clear();
     await refresh();
-  } catch (err: any) {
-    showToast('删除失败: ' + err, 'error');
   }
 }
 
-async function downloadFile(file: FileMetadata) {
+async function downloadSelected() {
   if (!props.sessionId) return;
-  try {
-    const defaultPath = file.name;
+  const count = selectedFiles.value.size;
+  if (count === 0) return;
+
+  const basePath = currentPath.value.replace(/\/$/, '');
+  const filesToDownload = files.value.filter(f => selectedFiles.value.has(f.name) && !f.is_dir);
+
+  if (filesToDownload.length === 0) {
+    showToast('没有可下载的文件（目前不支持直接下载文件夹）', 'error');
+    return;
+  }
+
+  if (filesToDownload.length === 1) {
+    // Single file download, let user select save path with filename
+    const defaultPath = filesToDownload[0].name;
     const savePath = await save({ defaultPath });
     if (!savePath) return; // user cancelled
-    showToast('开始下载...');
-    await invoke('sftp_download_file', { 
-      sessionId: props.sessionId, 
-      remotePath: currentPath.value.endsWith('/') ? `${currentPath.value}${file.name}` : `${currentPath.value}/${file.name}`,
-      localPath: savePath
-    });
-    showToast('下载完成');
-  } catch (err: any) {
-    showToast('下载失败: ' + err, 'error');
+    try {
+      showToast(`开始下载 ${filesToDownload[0].name}...`);
+      await invoke('sftp_download_file', { 
+        sessionId: props.sessionId, 
+        remotePath: basePath === '' ? `/${filesToDownload[0].name}` : `${basePath}/${filesToDownload[0].name}`,
+        localPath: savePath
+      });
+      showToast('下载完成');
+    } catch (err: any) {
+      showToast('下载失败: ' + err, 'error');
+    }
+    return;
   }
+
+  // Multi-file download: ask for directory
+  const selectedDir = await open({ directory: true, multiple: false });
+  if (!selectedDir) return; // user cancelled
+  const targetDir = Array.isArray(selectedDir) ? selectedDir[0] : selectedDir;
+  
+  let successCount = 0;
+  for (const file of filesToDownload) {
+    const localPath = `${targetDir}/${file.name}`;
+    const remotePath = basePath === '' ? `/${file.name}` : `${basePath}/${file.name}`;
+    try {
+      showToast(`正在下载 ${file.name}...`);
+      await invoke('sftp_download_file', { 
+        sessionId: props.sessionId, 
+        remotePath,
+        localPath
+      });
+      successCount++;
+    } catch (err: any) {
+      showToast(`下载失败 ${file.name}: ${err}`, 'error');
+    }
+  }
+  
+  if (successCount > 0) {
+    showToast(`成功下载 ${successCount}/${filesToDownload.length} 个文件`);
+  }
+}
+
+// Support for inline table action buttons
+async function deleteFile(file: FileMetadata) {
+  // If clicked file is not selected, select only it
+  if (!selectedFiles.value.has(file.name)) {
+    selectedFiles.value.clear();
+    selectedFiles.value.add(file.name);
+  }
+  await deleteSelected();
+}
+
+async function downloadFile(file: FileMetadata) {
+  // If clicked file is not selected, select only it
+  if (!selectedFiles.value.has(file.name)) {
+    selectedFiles.value.clear();
+    selectedFiles.value.add(file.name);
+  }
+  await downloadSelected();
 }
 
 async function uploadFile() {
@@ -664,21 +1000,36 @@ async function uploadFile() {
   }
 }
 
-async function compressFile(file: FileMetadata) {
+async function compressSelected() {
   if (!props.sessionId) return;
+  const count = selectedFiles.value.size;
+  if (count === 0) return;
+
+  const names = Array.from(selectedFiles.value);
+  const defaultName = count === 1 ? `${names[0]}.tar.gz` : 'archive.tar.gz';
+  const archiveName = await customPrompt('请输入压缩包名称:', defaultName);
+  
+  if (!archiveName) return;
+
   const parentPath = currentPath.value.replace(/\/$/, ''); 
   const pPath = parentPath === '' ? '/' : parentPath;
+  
+  batchProgress.value = { action: '打包压缩', current: 0, total: 0, itemName: '请稍候...' };
+  
   try {
-    showToast(`正在压缩 ${file.name}...`);
+    showToast(`正在压缩 ${count} 个项...`);
     await invoke('sftp_compress', { 
       sessionId: props.sessionId, 
       parentPath: pPath, 
-      targetName: file.name 
+      targetNames: names,
+      archiveName
     });
     showToast('压缩成功!');
     await refresh();
   } catch (err: any) {
     showToast('压缩失败: ' + err, 'error');
+  } finally {
+    batchProgress.value = null;
   }
 }
 
@@ -686,6 +1037,9 @@ async function extractFile(file: FileMetadata) {
   if (!props.sessionId) return;
   const parentPath = currentPath.value.replace(/\/$/, ''); 
   const pPath = parentPath === '' ? '/' : parentPath;
+  
+  batchProgress.value = { action: '解压', current: 0, total: 0, itemName: file.name };
+  
   try {
     showToast(`正在解压 ${file.name}...`);
     await invoke('sftp_extract', { 
@@ -697,6 +1051,8 @@ async function extractFile(file: FileMetadata) {
     await refresh();
   } catch (err: any) {
     showToast('解压失败: ' + err, 'error');
+  } finally {
+    batchProgress.value = null;
   }
 }
 </script>
@@ -832,6 +1188,14 @@ async function extractFile(file: FileMetadata) {
 
 .file-table tr:hover td {
   background: rgba(255, 255, 255, 0.03); /* var(--bg-hover) */
+}
+
+.file-table tr.selected td {
+  background: rgba(99, 102, 241, 0.15) !important; /* 蓝紫色高亮表示被选中 */
+}
+
+.file-table tr.selected:hover td {
+  background: rgba(99, 102, 241, 0.25) !important;
 }
 
 .file-name-cell {
@@ -1045,9 +1409,28 @@ async function extractFile(file: FileMetadata) {
   background: #6366f1;
   transition: width 0.1s linear;
 }
+
+.progress-fill.indeterminate {
+  background: linear-gradient(90deg, 
+    #6366f1 25%, 
+    #818cf8 50%, 
+    #6366f1 75%
+  );
+  background-size: 200% 100%;
+  animation: indeterminate-progress 1.5s infinite linear;
+}
+
+@keyframes indeterminate-progress {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
 tr.drag-over td {
   background: rgba(99, 102, 241, 0.15) !important;
   border-bottom-color: #6366f1;
+}
+
+tr.is-dragging-source {
+  opacity: 0.4;
 }
 
 .file-action-row:hover { background: var(--bg-hover, #f8f9fa); }

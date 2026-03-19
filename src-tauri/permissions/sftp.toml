@@ -49,3 +49,13 @@ commands.allow = ["sftp_download_file"]
 identifier = "allow-sftp-upload-file"
 description = "Enables the sftp_upload_file command"
 commands.allow = ["sftp_upload_file"]
+
+[[permission]]
+identifier = "allow-sftp-copy"
+description = "Enables the sftp_copy command"
+commands.allow = ["sftp_copy"]
+
+[[permission]]
+identifier = "allow-sftp-exec"
+description = "Enables the sftp_exec command"
+commands.allow = ["sftp_exec"]

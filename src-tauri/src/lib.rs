@@ -107,6 +107,8 @@ pub fn run() {
             sftp::sftp_upload_file,
             sftp::sftp_compress,
             sftp::sftp_extract,
+            sftp::sftp_copy,
+            sftp::sftp_exec,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

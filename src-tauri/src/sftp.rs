@@ -212,18 +212,21 @@ pub async fn sftp_download_file(
     };
 
     tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let sftp = sess.sftp().map_err(|e| format!("SFTP 会话创建失败: {}", e))?;
         let remote_obj = std::path::Path::new(&remote_path);
         
         let local_obj = std::path::Path::new(&local_path);
         let mut local_file = std::fs::File::create(local_obj)
             .map_err(|e| format!("无法创建本地文件: {}", e))?;
 
-        let (mut remote_file, stat) = sess.scp_recv(remote_obj)
-            .map_err(|e| format!("打开远程文件失败(建议尝试): {}", e))?;
-        let total = stat.size();
+        let mut remote_file = sftp.open(remote_obj)
+            .map_err(|e| format!("打开远程文件失败: {}", e))?;
+        let stat = sftp.stat(remote_obj)
+            .map_err(|e| format!("获取文件信息失败: {}", e))?;
+        let total = stat.size.unwrap_or(0);
         let file_name = remote_obj.file_name().unwrap_or_default().to_string_lossy().into_owned();
         
-        let mut buffer = vec![0u8; 128 * 1024]; // 128KB 吞吐量缓冲区在堆上分配
+        let mut buffer = vec![0u8; 128 * 1024];
         let mut transferred = 0u64;
         let mut last_emit = std::time::Instant::now();
 
@@ -345,8 +348,13 @@ pub async fn sftp_compress(
     state: State<'_, SftpPool>,
     session_id: String,
     parent_path: String,
-    target_name: String,
+    target_names: Vec<String>,
+    archive_name: String,
 ) -> Result<(), String> {
+    if target_names.is_empty() {
+        return Err("未指定压缩目标".into());
+    }
+
     let sess = {
         let pool = state.0.lock().unwrap();
         let conn = pool.get(&session_id).ok_or("SFTP会话未连接")?;
@@ -355,11 +363,16 @@ pub async fn sftp_compress(
     
     let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
     
+    let escaped_targets = target_names.iter()
+        .map(|s| shell_escape(s))
+        .collect::<Vec<_>>()
+        .join(" ");
+
     let cmd = format!(
         "cd {} && tar -czf {} {}", 
         shell_escape(&parent_path), 
-        shell_escape(&format!("{}.tar.gz", target_name)), 
-        shell_escape(&target_name)
+        shell_escape(&archive_name), 
+        escaped_targets
     );
     
     channel.exec(&cmd).map_err(|e| e.to_string())?;
@@ -425,4 +438,58 @@ pub async fn sftp_extract(
     }
     
     Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_copy(
+    state: State<'_, SftpPool>,
+    session_id: String,
+    source_path: String,
+    dest_path: String,
+) -> Result<(), String> {
+    let sess = {
+        let pool = state.0.lock().unwrap();
+        let conn = pool.get(&session_id).ok_or("SFTP会话未连接")?;
+        conn.sess.clone()
+    };
+
+    let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
+    let cmd = format!("cp -r {} {}", shell_escape(&source_path), shell_escape(&dest_path));
+    channel.exec(&cmd).map_err(|e| e.to_string())?;
+
+    use std::io::Read;
+    let mut stderr = String::new();
+    channel.stderr().read_to_string(&mut stderr).ok();
+
+    channel.wait_close().map_err(|e| e.to_string())?;
+    let exit_status = channel.exit_status().unwrap_or(1);
+
+    if exit_status != 0 {
+        return Err(format!("复制失败: {}", stderr));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_exec(
+    state: State<'_, SftpPool>,
+    session_id: String,
+    command: String,
+) -> Result<String, String> {
+    let sess = {
+        let pool = state.0.lock().unwrap();
+        let conn = pool.get(&session_id).ok_or("SFTP会话未连接")?;
+        conn.sess.clone()
+    };
+
+    let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
+    channel.exec(&command).map_err(|e| e.to_string())?;
+
+    use std::io::Read;
+    let mut stdout = String::new();
+    channel.read_to_string(&mut stdout).map_err(|e| e.to_string())?;
+    channel.wait_close().map_err(|e| e.to_string())?;
+
+    Ok(stdout.trim().to_string())
 }

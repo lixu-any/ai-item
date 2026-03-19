@@ -77,7 +77,7 @@ let unlisten: UnlistenFn | null = null;
 let unlistenSettings: UnlistenFn | null = null;
 let resizeObserver: ResizeObserver | null = null;
 
-const emit = defineEmits(['data', 'resize']);
+const emit = defineEmits(['data', 'resize', 'zmodem-detect', 'zmodem-sz']);
 
 const showMenu = ref(false);
 const menuX = ref(0);
@@ -93,6 +93,9 @@ const autoCompletionEnabled = ref(true);
 const suggestions = ref<string[]>([]);
 const selectedCompIdx = ref(0);
 let currentInputStr = '';
+let lastSubmittedCmd = '';
+let lastSeenCwd = '~'; // Track cwd from terminal prompt
+let zmodemCooldown = false; // Prevent re-triggering after abort
 let compTimeout: any = null;
 
 // Mock list of common commands for basic completion
@@ -281,6 +284,26 @@ onMounted(async () => {
   term.onData(async (data) => {
     // 粗略跟踪输入，如果不精确，可后续改进
     if (data === '\r' || data === '\n' || data === '\x03' /* Ctrl+C */) {
+      // Read the actual command from xterm buffer (captures Tab completion too)
+      try {
+        const buf = term?.buffer.active;
+        if (!buf) throw new Error('no buffer');
+        const cursorRow = buf.cursorY + buf.viewportY;
+        let lineText = '';
+        for (let i = 0; i <= cursorRow && i < buf.length; i++) {
+          const line = buf.getLine(i);
+          if (line) lineText = line.translateToString(true);
+        }
+        // Extract command after prompt (after last $ or #)
+        const afterPrompt = lineText.replace(/^.*[#$]\s*/, '').trim();
+        if (afterPrompt.length > 0) {
+          lastSubmittedCmd = afterPrompt;
+        } else {
+          lastSubmittedCmd = currentInputStr.trim();
+        }
+      } catch {
+        lastSubmittedCmd = currentInputStr.trim();
+      }
       currentInputStr = '';
       suggestions.value = [];
     } else if (data === '\x7f' || data === '\b') {
@@ -367,6 +390,88 @@ async function setupSessionListener(id: string) {
       unlisten = await listen<number[]>(`sse-data-${id}`, (event) => {
         if (term) {
           const u8 = new Uint8Array(event.payload);
+          
+          // Save cooldown state BEFORE prompt parsing may reset it
+          // (used later for filtering - must capture state before any mutation)
+          const wasInCooldown = zmodemCooldown;
+
+          // Always parse shell prompt for cwd tracking (on all SSH data)
+          if (props.type === 'ssh') {
+            const text = new TextDecoder().decode(u8);
+            
+            // Parse prompt: [user@host dir]# or user@host:dir$
+            const promptMatch = text.match(/\[\w+@[\w.-]+\s+([^\]]+)\]\s*[#$]/) ||
+                                text.match(/\w+@[\w.-]+:([^\$#]+)[\$#]/);
+            if (promptMatch) {
+              lastSeenCwd = promptMatch[1].trim();
+              // Reset ZMODEM cooldown when shell prompt appears (operation is done)
+              zmodemCooldown = false;
+            }
+          }
+
+          // ZMODEM detection: look for "**\x18B0" (ZRQINIT) or rz waiting sequence
+          if (props.type === 'ssh' && u8.length > 4 && !zmodemCooldown) {
+            const text = new TextDecoder('utf-8', { fatal: false }).decode(u8);
+            const isZmodem = text.includes('**\x18B0') || text.includes('rz waiting to receive');
+            
+            if (isZmodem) {
+              // Set cooldown: ignore further ZMODEM until shell prompt reappears
+              zmodemCooldown = true;
+              const cmd = lastSubmittedCmd.trim();
+              // Match 'sz' anywhere in the command (handles 'cd /tmp && sz file')
+              const szMatch = cmd.match(/(?:^|\s|&&|\|)sz\s+(.+?)(?:\s*&&|\s*\||$)/i) ||
+                              cmd.match(/\bsz\s+(.+)/i);
+              const isSz = !!szMatch;
+              const filenameFromCmd = szMatch ? szMatch[1].trim().split(/\s+/)[0] : '';
+              lastSubmittedCmd = '';
+              
+              if (isSz) {
+                // Use ps to get the EXACT command args of the running sz process
+                // AND use /proc to get the real cwd of the shell - all in one exec
+                invoke('sftp_exec', {
+                  sessionId: id,
+                  command: 'SZ_PID=$(pgrep -n sz 2>/dev/null); FILE=$(xargs -0 < /proc/$SZ_PID/cmdline 2>/dev/null | cut -d" " -f2-); CWD=$(readlink /proc/$SZ_PID/cwd 2>/dev/null || echo $HOME); echo "FILE:$FILE|CWD:$CWD"'
+                }).then((result: any) => {
+                  const res = String(result).trim();
+                  const fileMatch = res.match(/FILE:(.+)\|CWD:(.+)/);
+                  const szFilename = fileMatch ? fileMatch[1].trim() : filenameFromCmd;
+                  const szCwd = fileMatch ? fileMatch[2].trim() : lastSeenCwd;
+                  
+                  invoke('write_to_ssh', { sessionId: id, data: [24,24,24,24,24,8,8,8,8,8] }).catch(() => {});
+                  term?.writeln(`\x1b[1;33m[Nixu]\x1b[0m sz: ${szFilename} (${szCwd})`);
+                  emit('zmodem-sz', { sessionId: id, filename: szFilename, cwd: szCwd });
+                }).catch(() => {
+                  invoke('write_to_ssh', { sessionId: id, data: [24,24,24,24,24,8,8,8,8,8] }).catch(() => {});
+                  emit('zmodem-sz', { sessionId: id, filename: filenameFromCmd, cwd: lastSeenCwd });
+                });
+              } else {
+                // rz: send Ctrl+C immediately and emit right away
+                // Don't wait for sftp_exec - App.vue's resolveCwd will handle the path
+                invoke('write_to_ssh', { sessionId: id, data: [24,24,24,24,24,8,8,8,8,8] }).catch(() => {});
+                term?.write('\r\n');
+                term?.writeln(`\x1b[1;33m[Nixu]\x1b[0m 检测到 rz，弹出上传窗口...`);
+                emit('zmodem-detect', { sessionId: id, cwd: lastSeenCwd });
+              }
+              return;
+            }
+          }
+          
+          // During ZMODEM cooldown, strip ZMODEM control bytes but keep printable content
+          // Use wasInCooldown (captured before promptMatch may have reset it) 
+          if (wasInCooldown) {
+            const t = new TextDecoder('utf-8', { fatal: false }).decode(u8);
+            // Check if packet contains ZMODEM sequences
+            if (t.includes('\x18') || t.includes('**B')) {
+              // Strip ZMODEM bytes, keep printable chars and ANSI sequences
+              const cleaned = t.replace(/[\x18]+/g, '')   // Remove CAN (ZMODEM abort) bytes
+                               .replace(/\*\*B[0-9a-fA-F]*/g, ''); // Remove ZMODEM headers
+              if (cleaned.length > 0) {
+                term.write(cleaned);
+              }
+              return;
+            }
+          }
+
           term.write(u8);
           // 录制拦截
           if (isRecording.value) {

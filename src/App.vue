@@ -347,6 +347,162 @@ function showToast(message: string, type: 'success' | 'error' = 'success') {
   }, 3000);
 }
 
+async function ensureSftpConnected(session: any) {
+  const host = session.host;
+  const authType = host.private_key ? 'private_key' : 'password';
+  try {
+    await invoke('sftp_connect', {
+      sessionId: session.id,
+      host: host.host,
+      port: host.port || 22,
+      username: host.username || 'root',
+      authType,
+      password: host.password || '',
+      privateKey: host.private_key || '',
+    });
+  } catch (e: any) {
+    if (!String(e).includes('已连接')) {
+      console.warn('SFTP connect attempt:', e);
+    }
+  }
+}
+
+async function resolveCwd(sessionId: string, cwd: string): Promise<string> {
+  if (cwd.startsWith('/')) return cwd;
+  if (cwd === '~' || !cwd) {
+    // Get home dir via sftp_exec
+    try {
+      const home = await invoke('sftp_exec', { sessionId, command: 'echo $HOME' }) as string;
+      return home || '/root';
+    } catch { return '/root'; }
+  }
+  // Prompt shows basename only, e.g. "tmp" → could be /tmp or ~/tmp
+  // Try /<cwd> first (absolute), then ~/cwd, then HOME fallback
+  try {
+    const resolved = await invoke('sftp_exec', {
+      sessionId,
+      command: `if [ -d "/${cwd}" ]; then echo "/${cwd}"; elif [ -d "$HOME/${cwd}" ]; then echo "$HOME/${cwd}"; else echo "$HOME"; fi`
+    }) as string;
+    return resolved || '/root';
+  } catch { return '/root'; }
+}
+
+async function handleZmodemDetect(session: any, payload?: any) {
+  if (session.type !== 'ssh' || !session.host) return;
+  const cwd = payload?.cwd || '~';
+  try {
+    const selected = await open({ multiple: true, title: 'rz - 选择要上传的文件' });
+    if (!selected) {
+      showToast('已取消上传');
+      return;
+    }
+    const paths = Array.isArray(selected) ? selected : [selected];
+    
+    await ensureSftpConnected(session);
+    const remoteCwd = await resolveCwd(session.id, cwd);
+    
+    for (const localPath of paths) {
+      if (typeof localPath !== 'string') continue;
+      const filename = localPath.split(/[/\\]/).pop() || 'uploaded_file';
+      const remotePath = `${remoteCwd}/${filename}`;
+      showToast(`正在上传 ${filename} 到 ${remoteCwd}...`);
+      try {
+        await invoke('sftp_upload_file', {
+          sessionId: session.id,
+          localPath,
+          remotePath,
+        });
+        showToast(`${filename} 上传完成!`);
+      } catch (err: any) {
+        showToast(`${filename} 上传失败: ${err}`, 'error');
+      }
+    }
+  } catch (err: any) {
+    showToast('文件选择失败: ' + err, 'error');
+  } finally {
+    // Send \r to restore shell prompt
+    invoke('write_to_ssh', { sessionId: session.id, data: [13] }).catch(() => {});
+    // Refocus the xterm terminal after native dialog closes (dialog steals focus)
+    setTimeout(() => {
+      invoke('write_to_ssh', { sessionId: session.id, data: [13] }).catch(() => {});
+      // Focus the xterm canvas element so user can type immediately
+      const xtermCanvas = document.querySelector('.xterm-helper-textarea') as HTMLElement;
+      xtermCanvas?.focus();
+    }, 300);
+  }
+}
+
+async function handleZmodemSz(session: any, payload: { sessionId: string; filename: string; cwd: string }) {
+  if (session.type !== 'ssh' || !session.host) return;
+  try {
+    const filename = payload.filename.split(/\s+/)[0];
+    if (!filename) {
+      showToast('sz 命令未指定文件名', 'error');
+      return;
+    }
+
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    const savePath = await save({
+      title: `sz - 保存 ${filename}`,
+      defaultPath: filename.split('/').pop() || filename,
+    });
+    if (!savePath) {
+      showToast('已取消下载');
+      return;
+    }
+
+    await ensureSftpConnected(session);
+    
+    // Build remote path from cwd + filename
+    let remotePath = filename;
+    if (!remotePath.startsWith('/')) {
+      const remoteCwd = await resolveCwd(session.id, payload.cwd || '~');
+      remotePath = `${remoteCwd}/${filename}`;
+    }
+
+    showToast(`正在下载 ${remotePath}...`);
+    try {
+      await invoke('sftp_download_file', {
+        sessionId: session.id,
+        remotePath,
+        localPath: savePath,
+      });
+      showToast(`${filename} 下载完成!`);
+    } catch (firstErr: any) {
+      // First attempt failed, try to locate the file
+      showToast(`路径 ${remotePath} 失败，正在搜索文件...`);
+      try {
+        const found = await invoke('sftp_exec', {
+          sessionId: session.id,
+          command: `find /tmp /root /home /var /opt -maxdepth 3 -name "${filename}" -type f 2>/dev/null | head -1`,
+        }) as string;
+        if (found && found.length > 0) {
+          remotePath = found;
+          showToast(`找到文件: ${remotePath}`);
+          await invoke('sftp_download_file', {
+            sessionId: session.id,
+            remotePath,
+            localPath: savePath,
+          });
+          showToast(`${filename} 下载完成!`);
+        } else {
+          throw new Error(`文件未找到: ${filename}`);
+        }
+      } catch (retryErr: any) {
+        showToast(`下载失败: ${retryErr}`, 'error');
+      }
+    }
+  } catch (err: any) {
+    showToast('下载失败: ' + err, 'error');
+  } finally {
+    invoke('write_to_ssh', { sessionId: session.id, data: [13] }).catch(() => {});
+    setTimeout(() => {
+      invoke('write_to_ssh', { sessionId: session.id, data: [13] }).catch(() => {});
+      const xtermCanvas = document.querySelector('.xterm-helper-textarea') as HTMLElement;
+      xtermCanvas?.focus();
+    }, 300);
+  }
+}
 const newHost = ref<Host>({
   name: '',
   host: '',
@@ -1334,6 +1490,8 @@ async function saveWindowSize() {
                 :session-id="session.id" 
                 :is-active="activeSessionId === session.id && getSessionViewMode(session.id) === 'terminal'"
                 :type="(session.type as 'ssh' | 'local')"
+                @zmodem-detect="handleZmodemDetect(session, $event)"
+                @zmodem-sz="handleZmodemSz(session, $event)"
               />
               <SftpBrowser
                 v-if="session.type === 'ssh'"
