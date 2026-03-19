@@ -322,11 +322,15 @@ pub async fn get_host_stats(
     sess.set_blocking(true);
     sess.handshake().map_err(|e| e.to_string())?;
 
-    // 认证
-    if let Some(pk) = &private_key {
-        if !pk.is_empty() {
-            let key_path = std::path::Path::new(pk.as_str());
-            sess.userauth_pubkey_file(&username, None, key_path, None)
+    if let Some(pk_raw) = private_key {
+        if !pk_raw.is_empty() {
+            let pkey = if pk_raw.trim().starts_with("-----BEGIN") {
+                pk_raw
+            } else {
+                let path_str = pk_raw.replace("~", &std::env::var("HOME").unwrap_or_default());
+                std::fs::read_to_string(path_str).map_err(|e| format!("私钥文件无效: {}", e))?
+            };
+            sess.userauth_pubkey_memory(&username, None, &pkey, password.as_deref())
                 .map_err(|e| format!("密钥认证失败: {}", e))?;
         }
     }
@@ -377,6 +381,21 @@ DISK_PCT=$(echo "$DISK" | awk '{gsub(/%/,"",$5); print $5}')
 printf "DISK_TOTAL=%s\n" "$DISK_TOTAL"
 printf "DISK_USED=%s\n" "$DISK_USED"
 printf "DISK_PCT=%s\n" "${DISK_PCT:-0}"
+
+# Network
+NET1=$(awk 'NR>2{rx+=$2; tx+=$10} END{print rx" "tx}' /proc/net/dev 2>/dev/null)
+if [ -n "$NET1" ]; then
+    sleep 1
+    NET2=$(awk 'NR>2{rx+=$2; tx+=$10} END{print rx" "tx}' /proc/net/dev 2>/dev/null)
+    RX1=$(echo "$NET1" | awk '{print $1}'); TX1=$(echo "$NET1" | awk '{print $2}')
+    RX2=$(echo "$NET2" | awk '{print $1}'); TX2=$(echo "$NET2" | awk '{print $2}')
+    printf "NET_RX_BPS=%s\n" "$((RX2-RX1))"
+    printf "NET_TX_BPS=%s\n" "$((TX2-TX1))"
+fi
+
+# Top 5 CPU processes
+TOP5=$(ps axo pid,pcpu,comm 2>/dev/null | sort -k2 -n -r | head -n 5 | awk '{printf "%s|%s|%s;", $1, $2, $3}')
+printf "TOP5_PROCS=%s\n" "$TOP5"
 "#;
 
     let mut channel = sess.channel_session().map_err(|e| e.to_string())?;

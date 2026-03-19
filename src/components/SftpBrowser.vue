@@ -1,5 +1,12 @@
 <template>
-  <div class="sftp-browser">
+  <div class="sftp-browser" @dragover.prevent @drop.prevent>
+    <!-- Overlay for OS file drop -->
+    <div class="drag-overlay" v-if="isDraggingFile">
+      <div class="drag-overlay-content">
+        <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="drag-icon"><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/><path d="M12 12v9"/><path d="m8 16 4-4 4 4"/></svg>
+        <h2 style="font-size:16px;color:#333;margin:0">松开以传送到本目录</h2>
+      </div>
+    </div>
     <div class="sftp-header">
       <div class="path-bar">
         <button class="icon-btn" @click="goUp" :disabled="currentPath === '/' || !currentPath">
@@ -43,7 +50,32 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="file in sortedFiles" :key="file.name" @dblclick="handleDoubleClick(file)" @contextmenu.prevent.stop="onFileContextMenu($event, file)">
+          <tr v-if="currentPath !== '/'" class="file-action-row" @click="goUp"
+              @dragenter.prevent="dragOverDir = '..'"
+              @dragover.prevent="dragOverDir = '..'"
+              @dragleave.prevent="handleDragLeave($event)"
+              @drop.prevent.stop="onInternalDrop('..')"
+              :class="{ 'drag-over': dragOverDir === '..' }"
+              style="cursor: pointer;">
+            <td colspan="6">
+              <span class="back-link" style="display:flex;align-items:center;gap:6px;color:#6366f1;font-weight:600;padding-left:4px">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                返回上级目录 (..)
+              </span>
+            </td>
+          </tr>
+          <tr v-for="file in sortedFiles" :key="file.name" 
+              class="file-item"
+              :draggable="true"
+              @dragstart="onInternalDragStart($event, file)"
+              @dragend="onInternalDragEnd"
+              @dragenter.prevent="handleInternalDragEnter($event, file)"
+              @dragover.prevent="handleInternalDragEnter($event, file)"
+              @dragleave.prevent="handleDragLeave($event)"
+              @drop.prevent.stop="handleInternalDrop($event, file)"
+              :class="{ 'drag-over': dragOverDir === file.name }"
+              @dblclick="handleDoubleClick(file)" 
+              @contextmenu.prevent.stop="onFileContextMenu($event, file)">
             <td class="file-name-cell">
               <svg v-if="file.is_dir" class="file-icon folder" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
               <svg v-else class="file-icon file" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>
@@ -51,7 +83,7 @@
             </td>
             <td>{{ file.is_dir ? '-' : formatSize(file.size) }}</td>
             <td>{{ file.is_dir ? '文件夹' : '文件' }}</td>
-            <td>{{ file.permissions ? file.permissions.toString(8) : '-' }}</td>
+            <td>{{ file.permissions ? (file.permissions & 0o777).toString(8).padStart(3, '0') : '-' }}</td>
             <td>{{ file.modified_time ? new Date(file.modified_time * 1000).toLocaleString() : '-' }}</td>
             <td class="action-cell">
               <button class="text-btn" @click.stop="downloadFile(file)" v-if="!file.is_dir">下载</button>
@@ -163,6 +195,14 @@ const files = ref<FileMetadata[]>([]);
 const loading = ref(false);
 const hasConnected = ref(false);
 
+const isDraggingFile = ref(false);
+const draggedInternalFile = ref<FileMetadata | null>(null);
+const dragOverDir = ref<string | null>(null);
+
+let unlistenDropHover: any = null;
+let unlistenDrop: any = null;
+let unlistenDropCancelled: any = null;
+
 interface TransferProgress {
   session_id: string;
   file: string;
@@ -196,13 +236,25 @@ function onEmptyContextMenu(e: MouseEvent) {
 
 function onFileContextMenu(e: MouseEvent, file: FileMetadata) {
   contextFile.value = file;
-  menuItems.value = [
-    { label: '下载', action: 'download', disabled: file.is_dir },
-    { label: '压缩', action: 'compress' },
+  const mItems: MenuItem[] = [
+    { label: '下载', action: 'download', disabled: file.is_dir }
+  ];
+  
+  if (!file.is_dir) {
+    const lowerName = file.name.toLowerCase();
+    if (lowerName.endsWith('.zip') || lowerName.endsWith('.tar.gz') || lowerName.endsWith('.tgz') || lowerName.endsWith('.tar')) {
+      mItems.push({ label: '解压到本目录', action: 'extract' });
+    }
+  }
+  
+  mItems.push(
+    { label: '压缩为 .tar.gz', action: 'compress' },
     { label: '重命名', action: 'rename' },
     { divider: true },
     { label: '删除', action: 'delete', danger: true }
-  ];
+  );
+
+  menuItems.value = mItems;
   menuX.value = e.clientX;
   menuY.value = e.clientY;
   showMenu.value = true;
@@ -217,6 +269,7 @@ function handleMenuAction(action: string) {
   } else {
     const file = contextFile.value;
     if (action === 'download' && !file.is_dir) downloadFile(file);
+    if (action === 'extract') extractFile(file);
     if (action === 'compress') compressFile(file);
     if (action === 'rename') renameFile(file);
     if (action === 'delete') deleteFile(file);
@@ -287,6 +340,27 @@ onMounted(async () => {
     }
   });
 
+  unlistenDropHover = await listen('tauri://drag-enter', () => {
+    if (props.isActive && !draggedInternalFile.value) {
+      isDraggingFile.value = true;
+    }
+  });
+
+  unlistenDropCancelled = await listen('tauri://drag-leave', () => {
+    isDraggingFile.value = false;
+  });
+
+  unlistenDrop = await listen('tauri://drop', (event: any) => {
+    if (!props.isActive) return;
+    isDraggingFile.value = false;
+    if (draggedInternalFile.value) return;
+
+    const paths = event.payload?.paths || event.payload;
+    if (Array.isArray(paths) && paths.length > 0) {
+      handleOsFileDrop(paths);
+    }
+  });
+
   if (props.isActive) {
     hasConnected.value = true;
     await connect();
@@ -301,12 +375,117 @@ watch(() => props.isActive, async (active) => {
 });
 
 onUnmounted(async () => {
+  if (unlistenProgress) unlistenProgress();
+  if (unlistenDropHover) unlistenDropHover();
+  if (unlistenDropCancelled) unlistenDropCancelled();
+  if (unlistenDrop) unlistenDrop();
+
   if (props.sessionId) {
     try {
       await invoke('sftp_close', { sessionId: props.sessionId });
     } catch(e) {}
   }
 });
+
+function onInternalDragStart(e: DragEvent, file: FileMetadata) {
+  draggedInternalFile.value = file;
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', file.name);
+  }
+}
+
+function onInternalDragEnd() {
+  draggedInternalFile.value = null;
+  dragOverDir.value = null;
+}
+
+function handleDragEnter(e: DragEvent, name: string) {
+  dragOverDir.value = name;
+}
+
+function handleInternalDragEnter(e: DragEvent, file: FileMetadata) {
+  if (file.is_dir) dragOverDir.value = file.name;
+}
+
+function handleDragLeave(e: DragEvent) {
+  const current = e.currentTarget as HTMLElement;
+  const related = e.relatedTarget as Node | null;
+  // If moving within the same TR row, ignore the leave event
+  if (!current.contains(related)) {
+    dragOverDir.value = null;
+  }
+}
+
+async function handleInternalDrop(e: DragEvent, file: FileMetadata) {
+  if (!file.is_dir) {
+    showToast(`Drop failed: ${file.name} is not a directory`, 'error');
+    return;
+  }
+  await onInternalDrop(file.name);
+}
+
+async function onInternalDrop(targetDirName: string) {
+  dragOverDir.value = null;
+  const file = draggedInternalFile.value;
+  if (!file) {
+    showToast(`Drop failed: draggedInternalFile is null`, 'error');
+    return;
+  }
+  draggedInternalFile.value = null;
+  if (file.name === targetDirName) {
+    showToast(`Drop ignored: same file name`, 'error');
+    return; 
+  }
+  
+  const basePath = currentPath.value.replace(/\/$/, '');
+  const oldPath = basePath === '' ? `/${file.name}` : `${basePath}/${file.name}`;
+  
+  let newPath = '';
+  if (targetDirName === '..') {
+    const parts = basePath.split('/');
+    parts.pop();
+    const upPath = parts.join('/') || '/';
+    newPath = (upPath === '/' ? '' : upPath) + '/' + file.name;
+  } else {
+    newPath = basePath === '' ? `/${targetDirName}/${file.name}` : `${basePath}/${targetDirName}/${file.name}`;
+  }
+  
+  try {
+    showToast(`正在移动 ${file.name}...`);
+    await invoke('sftp_rename', {
+        sessionId: props.sessionId,
+        oldPath,
+        newPath
+    });
+    showToast('移动成功!');
+    await refresh();
+  } catch(e: any) {
+    showToast(`移动失败: ${e}`, 'error');
+  }
+}
+
+async function handleOsFileDrop(paths: string[]) {
+  for (const p of paths) {
+      if (!p) continue;
+      const filename = p.split(/[/\\]/).pop();
+      if (!filename) continue;
+      
+      const bp = currentPath.value.replace(/\/$/, '');
+      const targetPath = bp === '' ? `/${filename}` : `${bp}/${filename}`;
+      showToast(`正在异步上传 ${filename}...`);
+      invoke('sftp_upload_file', {
+          sessionId: props.sessionId,
+          localPath: p,
+          remotePath: targetPath,
+      }).then(() => {
+          showToast(`${filename} 上传完成!`);
+          refresh();
+      }).catch(err => {
+          showToast(`${filename} 上传失败: ${err}`, 'error');
+      });
+  }
+}
 
 async function connect() {
   loading.value = true;
@@ -500,6 +679,24 @@ async function compressFile(file: FileMetadata) {
     await refresh();
   } catch (err: any) {
     showToast('压缩失败: ' + err, 'error');
+  }
+}
+
+async function extractFile(file: FileMetadata) {
+  if (!props.sessionId) return;
+  const parentPath = currentPath.value.replace(/\/$/, ''); 
+  const pPath = parentPath === '' ? '/' : parentPath;
+  try {
+    showToast(`正在解压 ${file.name}...`);
+    await invoke('sftp_extract', { 
+      sessionId: props.sessionId, 
+      parentPath: pPath, 
+      targetName: file.name 
+    });
+    showToast('解压成功!');
+    await refresh();
+  } catch (err: any) {
+    showToast('解压失败: ' + err, 'error');
   }
 }
 </script>
@@ -848,4 +1045,24 @@ async function compressFile(file: FileMetadata) {
   background: #6366f1;
   transition: width 0.1s linear;
 }
+tr.drag-over td {
+  background: rgba(99, 102, 241, 0.15) !important;
+  border-bottom-color: #6366f1;
+}
+
+.file-action-row:hover { background: var(--bg-hover, #f8f9fa); }
+
+.drag-overlay {
+  position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(99, 102, 241, 0.15); backdrop-filter: blur(4px);
+  z-index: 100; display: flex; align-items: center; justify-content: center;
+  border: 4px dashed var(--accent-color, #6366f1); border-radius: 12px; margin: 12px;
+  pointer-events: none;
+}
+.drag-overlay-content {
+  background: rgba(255,255,255,0.95);
+  padding: 32px 48px; border-radius: 20px; box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+}
+.drag-icon { width: 56px; height: 56px; color: var(--accent-color, #6366f1); }
 </style>

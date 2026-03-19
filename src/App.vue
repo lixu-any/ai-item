@@ -41,6 +41,31 @@ interface Host {
   private_key?: string | null;
 }
 
+function formatUptime(rawStr: string | undefined): string {
+  if (!rawStr) return '-';
+  const match = rawStr.match(/up\s+(.*?)(,\s+\d+\s+user|,?\s+load average)/);
+  if (!match) return rawStr;
+  
+  let upStr = match[1].trim(); 
+  upStr = upStr.replace(/days?/g, '天');
+  upStr = upStr.replace(/min(utes?)?/g, '分钟');
+  upStr = upStr.replace(/hours?/g, '小时');
+  
+  upStr = upStr.replace(/(\d+):(\d+)/, (m, h, min) => {
+    return `${parseInt(h, 10)} 小时 ${parseInt(min, 10)} 分钟`;
+  });
+  
+  return upStr.replace(/,\s*/g, ' ');
+}
+
+function formatNetworkSpeed(bytes: number): string {
+  if (bytes === 0 || isNaN(bytes)) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
 const sessions = ref<SessionTab[]>([]);
 const activeSessionId = ref<string | null>(null);
 const connecting = ref(false);
@@ -149,14 +174,23 @@ async function toggleRecording(sessionId: string, sessionTitle: string) {
 const showMonitor = ref(false);
 const monitorLoading = ref(false);
 const monitorHost = ref<Host | null>(null);
+interface TopProc {
+  pid: string;
+  cpu: string;
+  name: string;
+}
+
 interface MonitorStats {
   os: string; hostname: string; uptimeRaw: string; load1: number;
   cpuUsed: number;
   memTotal: number; memUsed: number; memPct: number;
   diskTotal: number; diskUsed: number; diskPct: number;
+  netRxBps?: number; netTxBps?: number;
+  top5Procs?: TopProc[];
 }
 const monitorStats = ref<MonitorStats | null>(null);
 let monitorSession: any = null;
+let monitorTimer: number | null = null;
 
 function parseKV(raw: string): Record<string, string> {
   const kv: Record<string, string> = {};
@@ -167,13 +201,9 @@ function parseKV(raw: string): Record<string, string> {
   return kv;
 }
 
-async function openMonitor(session: any) {
-  if (!session?.host) return;
-  monitorSession = session;
-  showMonitor.value = true;
-  monitorLoading.value = true;
-  monitorHost.value = session.host;
-  monitorStats.value = null;
+async function doFetchStats(session: any, showSpinner: boolean) {
+  if (!session?.host || !showMonitor.value) return;
+  if (showSpinner) monitorLoading.value = true;
   try {
     const raw = await invoke<string>('get_host_stats', {
       host: session.host.host, port: session.host.port,
@@ -181,10 +211,20 @@ async function openMonitor(session: any) {
       password: session.host.password || null,
       privateKey: session.host.private_key || null,
     });
+    if (!showMonitor.value) return;
     const kv = parseKV(raw);
     const num = (k: string) => parseFloat(kv[k] || '0') || 0;
     const memTotal = num('MEM_TOTAL'), memUsed = num('MEM_USED');
     const diskTotal = num('DISK_TOTAL'), diskUsed = num('DISK_USED');
+    const netRxBps = num('NET_RX_BPS');
+    const netTxBps = num('NET_TX_BPS');
+    
+    const top5Raw = kv['TOP5_PROCS'] || '';
+    const top5Procs: TopProc[] = top5Raw.split(';').filter(Boolean).map(item => {
+      const parts = item.split('|');
+      return { pid: parts[0] || '?', cpu: parts[1] || '0', name: parts[2] || '?' };
+    });
+
     monitorStats.value = {
       os: kv['OS'] || 'N/A',
       hostname: kv['HOSTNAME'] || session.host.host,
@@ -195,12 +235,38 @@ async function openMonitor(session: any) {
       memPct: memTotal > 0 ? Math.round(memUsed / memTotal * 100) : 0,
       diskTotal, diskUsed,
       diskPct: num('DISK_PCT'),
+      netRxBps,
+      netTxBps,
+      top5Procs
     };
   } catch (e: any) {
-    monitorStats.value = { os: `获取失败: ${e}`, hostname: '', uptimeRaw: '', load1: 0, cpuUsed: 0, memTotal: 0, memUsed: 0, memPct: 0, diskTotal: 0, diskUsed: 0, diskPct: 0 };
+    if (showMonitor.value) {
+      monitorStats.value = { os: `获取失败: ${e}`, hostname: '', uptimeRaw: '', load1: 0, cpuUsed: 0, memTotal: 0, memUsed: 0, memPct: 0, diskTotal: 0, diskUsed: 0, diskPct: 0 };
+    }
   } finally {
-    monitorLoading.value = false;
+    if (showSpinner) monitorLoading.value = false;
   }
+}
+
+async function openMonitor(session: any) {
+  if (!session?.host) return;
+  monitorSession = session;
+  showMonitor.value = true;
+  monitorHost.value = session.host;
+  monitorStats.value = null;
+  
+  if (monitorTimer) window.clearInterval(monitorTimer);
+  
+  await doFetchStats(session, true);
+  
+  monitorTimer = window.setInterval(() => {
+    if (!showMonitor.value) {
+      if (monitorTimer) window.clearInterval(monitorTimer);
+      monitorTimer = null;
+      return;
+    }
+    doFetchStats(session, false);
+  }, 3000);
 }
 
 
@@ -1344,7 +1410,7 @@ async function saveWindowSize() {
           <!-- Uptime / Info -->
           <div class="dash-card dash-info">
             <div class="dash-card-label">运行时长</div>
-            <div class="uptime-text">{{ monitorStats.uptimeRaw }}</div>
+            <div class="uptime-text">{{ formatUptime(monitorStats.uptimeRaw) }}</div>
           </div>
         </div>
 
@@ -1390,6 +1456,42 @@ async function saveWindowSize() {
               <span>已用 {{ (monitorStats.diskUsed / 1024).toFixed(1) }} GB</span>
               <span>共 {{ (monitorStats.diskTotal / 1024).toFixed(1) }} GB</span>
             </div>
+          </div>
+        </div>
+
+        <!-- Row 3: Network + Top Processes -->
+        <div class="dash-row">
+          <!-- Network -->
+          <div class="dash-card">
+            <div class="dash-card-label">实时网速</div>
+            <div class="net-stats">
+              <div class="net-item">
+                <span class="net-icon tx">↑</span>
+                <span class="net-value">{{ formatNetworkSpeed(monitorStats.netTxBps || 0) }}/s</span>
+              </div>
+              <div class="net-item">
+                <span class="net-icon rx">↓</span>
+                <span class="net-value">{{ formatNetworkSpeed(monitorStats.netRxBps || 0) }}/s</span>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Top CPU Processes -->
+          <div class="dash-card dash-procs">
+            <div class="dash-card-label">最高能耗进程 (TOP 5)</div>
+            <div class="proc-list" v-if="monitorStats.top5Procs && monitorStats.top5Procs.length">
+              <div class="proc-header">
+                <span style="width: 60px">PID</span>
+                <span style="flex: 1; padding-left: 8px">COMMAND</span>
+                <span style="width: 55px; text-align: right">%CPU</span>
+              </div>
+              <div class="proc-item" v-for="p in monitorStats.top5Procs" :key="p.pid">
+                <span class="proc-pid">{{ p.pid }}</span>
+                <span class="proc-name" :title="p.name">{{ p.name }}</span>
+                <span class="proc-cpu">{{ p.cpu }}%</span>
+              </div>
+            </div>
+            <div v-else class="proc-empty">暂无数据 / 权限不足</div>
           </div>
         </div>
       </div>
@@ -1860,7 +1962,7 @@ body, html, #app {
 .monitor-dash { padding: 16px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
 .dash-row { display: flex; gap: 12px; }
 .dash-card {
-  flex: 1; background: #f8faff; border: 1.5px solid #e8edff;
+  flex: 1 1 0%; min-width: 0; background: #f8faff; border: 1.5px solid #e8edff;
   border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 8px;
   transition: box-shadow 0.15s;
 }
@@ -1899,8 +2001,100 @@ body, html, #app {
   font-size: 11px; color: #6b7280;
 }
 
+/* Network & Processes */
+/* Removed dash-procs flex override to maintain 0 min-width inheritance */
+
+.net-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 14px;
+}
+.net-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--bg-hover, #f8f9fa);
+  padding: 10px 14px;
+  border-radius: 8px;
+}
+.net-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  font-weight: bold;
+  font-size: 14px;
+}
+.net-icon.tx { background: #fef3c7; color: #f59e0b; }
+.net-icon.rx { background: #d1fae5; color: #10b981; }
+.net-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-main, #333);
+  letter-spacing: 0.5px;
+}
+
+.proc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+.proc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-muted, #999);
+  padding: 0 8px 4px 8px;
+  border-bottom: 1px solid var(--border-color, #eee);
+  margin-bottom: 2px;
+}
+.proc-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  padding: 6px 8px;
+  background: var(--bg-hover, #f8f9fa);
+  border-radius: 6px;
+  transition: background 0.2s;
+}
+.proc-item:hover {
+  background: var(--bg-hover-focus, #eef2f6);
+}
+.proc-pid {
+  width: 60px;
+  color: var(--text-muted, #777);
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+.proc-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #4f46e5;
+  font-weight: 500;
+}
+.proc-cpu {
+  width: 55px;
+  text-align: right;
+  font-weight: 700;
+  color: #ef4444;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+.proc-empty {
+  font-size: 13px;
+  color: var(--text-muted, #777);
+  margin-top: 16px;
+  text-align: center;
+}
+
 /* Uptime card */
-.dash-info { flex: 1.2; }
 .uptime-text {
   font-size: 12px; color: #374151; font-family: 'JetBrains Mono', monospace;
   white-space: pre-wrap; line-height: 1.6; word-break: break-all;

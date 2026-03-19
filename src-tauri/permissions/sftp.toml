@@ -16,6 +16,11 @@ description = "Enables the sftp_compress command"
 commands.allow = ["sftp_compress"] 
 
 [[permission]]
+identifier = "allow-sftp-extract"
+description = "Enables the sftp_extract command"
+commands.allow = ["sftp_extract"]
+
+[[permission]]
 identifier = "allow-sftp-close"
 description = "Enables the sftp_close command"
 commands.allow = ["sftp_close"]

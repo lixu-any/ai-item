@@ -377,3 +377,52 @@ pub async fn sftp_compress(
     
     Ok(())
 }
+
+#[tauri::command]
+pub async fn sftp_extract(
+    state: State<'_, SftpPool>,
+    session_id: String,
+    parent_path: String,
+    target_name: String,
+) -> Result<(), String> {
+    let sess = {
+        let pool = state.0.lock().unwrap();
+        let conn = pool.get(&session_id).ok_or("SFTP会话未连接")?;
+        conn.sess.clone()
+    };
+    
+    let is_zip = target_name.to_lowercase().ends_with(".zip");
+    let is_tar_gz = target_name.to_lowercase().ends_with(".tar.gz") || target_name.to_lowercase().ends_with(".tgz");
+    let is_tar = target_name.to_lowercase().ends_with(".tar");
+    
+    if !is_zip && !is_tar_gz && !is_tar {
+        return Err("不支持的压缩包格式".to_string());
+    }
+
+    let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
+    
+    let extract_cmd = if is_zip {
+        format!("unzip -o {}", shell_escape(&target_name))
+    } else if is_tar_gz {
+        format!("tar -xzf {}", shell_escape(&target_name))
+    } else {
+        format!("tar -xf {}", shell_escape(&target_name))
+    };
+
+    let cmd = format!("cd {} && {}", shell_escape(&parent_path), extract_cmd);
+    
+    channel.exec(&cmd).map_err(|e| e.to_string())?;
+    
+    use std::io::Read;
+    let mut stderr = String::new();
+    channel.stderr().read_to_string(&mut stderr).ok();
+    
+    channel.wait_close().map_err(|e| e.to_string())?;
+    let exit_status = channel.exit_status().unwrap_or(1);
+    
+    if exit_status != 0 {
+        return Err(format!("解压失败: {}", stderr));
+    }
+    
+    Ok(())
+}
