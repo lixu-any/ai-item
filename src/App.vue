@@ -103,6 +103,18 @@ const showSnippetSidebar = ref(false);
 const showAiSidebar = ref(false);
 const showCredentialManager = ref(false);
 const terminalRefs = ref<Record<string, any>>({});
+const aiSidebarRef = ref<any>(null);
+
+function handleAiDiagnose(errorText: string) {
+  showAiSidebar.value = true;
+  showSnippetSidebar.value = false;
+  
+  nextTick(() => {
+    if (aiSidebarRef.value && typeof aiSidebarRef.value.diagnoseError === 'function') {
+      aiSidebarRef.value.diagnoseError(errorText);
+    }
+  });
+}
 
 // ---- 广播模式 ----
 const broadcastMode = ref(false);
@@ -220,6 +232,17 @@ const deletingGroupId = ref<number | null>(null);
 // 窗口大小持久化相关
 const appWindow = getCurrentWebviewWindow();
 let resizeTimer: any = null;
+
+
+function onTabsWheel(e: WheelEvent) {
+  const container = e.currentTarget as HTMLElement;
+  if (container) {
+    if (e.deltaY !== 0) {
+      container.scrollLeft += e.deltaY;
+      e.preventDefault();
+    }
+  }
+}
 
 // 右键菜单相关
 const showTabMenu = ref(false);
@@ -1023,8 +1046,8 @@ async function saveWindowSize() {
       @clear-recent="clearRecents"
       @drop-host="onDrop"
       @new-local="newLocalTerminal"
-      @toggle-snippet="showSnippetSidebar = !showSnippetSidebar"
-      @toggle-ai="showAiSidebar = !showAiSidebar"
+      @toggle-snippet="() => { showSnippetSidebar = !showSnippetSidebar; if (showSnippetSidebar) showAiSidebar = false; }"
+      @toggle-ai="() => { showAiSidebar = !showAiSidebar; if (showAiSidebar) showSnippetSidebar = false; }"
       @open-credential="openCredentialWindow"
       @open-recording="openRecordingFile"
       @open-settings="openSettingsWindow"
@@ -1032,39 +1055,41 @@ async function saveWindowSize() {
     <main class="main-content">
       <header class="top-bar" :class="{ 'broadcast-on': broadcastMode }">
         <div v-if="sessions.length === 0" class="no-tabs">未连接</div>
-        <div
-          v-for="session in sessions"
-          :key="session.id"
-          class="tab"
-          :class="{
-            active: activeSessionId === session.id,
-            disconnected: session.connected === false,
-            'bc-selected': broadcastMode && broadcastSelected.has(session.id)
-          }"
-          @click="activeSessionId = session.id"
-          @contextmenu.prevent="onTabContextMenu($event, session)"
-        >
-          <!-- 广播模式勾选 -->
-          <span
-            v-if="broadcastMode"
-            class="bc-check"
-            @click.stop="broadcastSelected.has(session.id)
-              ? broadcastSelected.delete(session.id)
-              : broadcastSelected.add(session.id)"
-          >{{ broadcastSelected.has(session.id) ? '✅' : '□' }}</span>
-          <span>{{ session.title }}</span>
-          <div class="tab-actions">
+        <div class="tabs-scroll-container" @wheel="onTabsWheel" v-show="sessions.length > 0">
+          <div
+            v-for="session in sessions"
+            :key="session.id"
+            class="tab"
+            :class="{
+              active: activeSessionId === session.id,
+              disconnected: session.connected === false,
+              'bc-selected': broadcastMode && broadcastSelected.has(session.id)
+            }"
+            @click="activeSessionId = session.id"
+            @contextmenu.prevent="onTabContextMenu($event, session)"
+          >
+            <!-- 广播模式勾选 -->
             <span
-              v-if="session.type === 'ssh'"
-              class="rec-btn"
-              :class="{ recording: recordingSessionId === session.id }"
-              @click.stop="toggleRecording(session.id, session.title)"
-              :title="recordingSessionId === session.id ? '停止录制' : '开始录制'"
-            >{{ recordingSessionId === session.id ? '⏹ REC' : '⏺' }}</span>
-            <SvgIcon name="close" size="12" class="close-icon" @click.stop="closeSession(session.id)" />
+              v-if="broadcastMode"
+              class="bc-check"
+              @click.stop="broadcastSelected.has(session.id)
+                ? broadcastSelected.delete(session.id)
+                : broadcastSelected.add(session.id)"
+            >{{ broadcastSelected.has(session.id) ? '✅' : '□' }}</span>
+            <span class="tab-title-text">{{ session.title }}</span>
+            <div class="tab-actions">
+              <span
+                v-if="session.type === 'ssh'"
+                class="rec-btn"
+                :class="{ recording: recordingSessionId === session.id }"
+                @click.stop="toggleRecording(session.id, session.title)"
+                :title="recordingSessionId === session.id ? '停止录制' : '开始录制'"
+              >{{ recordingSessionId === session.id ? '⏹ REC' : '⏺' }}</span>
+              <SvgIcon name="close" size="12" class="close-icon" @click.stop="closeSession(session.id)" />
+            </div>
           </div>
         </div>
-        <div class="top-bar-actions" v-if="activeSessionId && sessions.find(s => s.id === activeSessionId)?.type === 'ssh'" style="margin-left:auto; display:flex; align-items:center; padding-right:16px;">
+        <div class="top-bar-actions" v-if="activeSessionId && sessions.find(s => s.id === activeSessionId)?.type === 'ssh'" style="margin-left:auto; display:flex; align-items:center; padding-right:16px; flex-shrink:0;">
           <div class="view-toggle" style="display:flex; background:rgba(128,128,128,0.1); border-radius:6px; padding:3px; gap:2px;">
             <button 
               style="border:none; padding:4px 14px; border-radius:4px; font-size:12px; font-weight:500; cursor:pointer; transition:all 0.2s;"
@@ -1151,6 +1176,7 @@ async function saveWindowSize() {
                 :type="(session.type as 'ssh' | 'local')"
                 @zmodem-detect="handleZmodemDetect(session, $event)"
                 @zmodem-sz="handleZmodemSz(session, $event)"
+                @ai-diagnose="handleAiDiagnose"
               />
               <SftpBrowser
                 v-if="session.type === 'ssh'"
@@ -1173,7 +1199,13 @@ async function saveWindowSize() {
       <SnippetSidebar v-show="showSnippetSidebar" @run-snippet="handleRunSnippet" @close="showSnippetSidebar = false" />
     </Transition>
     <Transition name="slide">
-      <AiSidebar v-show="showAiSidebar" @run-command="handleRunSnippet" @toast="(t: any) => showToast(t.message, t.type)" @close="showAiSidebar = false" />
+      <AiSidebar 
+        ref="aiSidebarRef"
+        v-show="showAiSidebar" 
+        @run-command="handleRunSnippet" 
+        @toast="(t: any) => showToast(t.message, t.type)" 
+        @close="showAiSidebar = false" 
+      />
     </Transition>
   </div>
 
@@ -1317,6 +1349,7 @@ body, html, #app {
 .app-layout {
   display: flex;
   height: 100vh; width: 100vw;
+  position: relative;
 }
 
 /* Sidebar Styling */
@@ -1384,7 +1417,7 @@ body, html, #app {
 
 
 /* ===== \u5e7f\u64ad\u6a21\u5f0f ===== */
-.top-bar-extra { margin-left: auto; display: flex; align-items: center; gap: 6px; padding: 0 8px; margin-bottom: 5px; }
+.top-bar-extra { margin-left: auto; display: flex; align-items: center; gap: 6px; padding: 0 8px; margin-bottom: 5px; flex-shrink: 0; }
 .bc-toggle-btn {
   display: flex; align-items: center; gap: 5px;
   background: none; border: 1.5px solid var(--border-color); border-radius: 8px;
@@ -1586,6 +1619,7 @@ body, html, #app {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .top-bar {
@@ -1598,9 +1632,28 @@ body, html, #app {
   gap: 6px;
   padding-bottom: 6px;
   box-sizing: border-box;
+  width: 100%;
+}
+
+.tabs-scroll-container {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  position: relative;
+  scroll-behavior: smooth;
+}
+
+.tabs-scroll-container::-webkit-scrollbar {
+  display: none;
 }
 
 .tab {
+  flex-shrink: 0;
+  min-width: 140px;
+  max-width: 220px;
   height: 32px;
   padding: 0 14px;
   background: rgba(0, 0, 0, 0.03);
@@ -1615,6 +1668,13 @@ body, html, #app {
   cursor: pointer;
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
+}
+
+.tab-title-text {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .tab:hover { 
   background: rgba(0, 0, 0, 0.06); 

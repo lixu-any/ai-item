@@ -93,6 +93,34 @@ interface Segment {
   lang?: string;
 }
 
+function diagnoseError(errorText: string) {
+  if (!errorText.trim()) return;
+  const diagnosePrompt = `详细分析下列终端报错日志，查出根本原因，并在回复中直接提供可以一键粘贴执行的修复脚本代码（必须使用 \`\`\`bash 包裹）。如果可能，尽量给出副作用最小的修补方案：\n\n${errorText}`;
+  messages.value.push({ id: Date.now().toString(), role: 'user', content: `[AI 一键诊断报告]\n${errorText.length > 200 ? errorText.substring(0, 200) + '...' : errorText}` });
+  
+  isWaiting.value = true;
+  scrollToBottom();
+
+  const osInfo = props.context?.os || 'Linux';
+  const shellInfo = props.context?.shell || 'bash';
+  const systemPrompt = `你是一个终极 Linux 专家架构师。\n当前发生故障的环境: ${osInfo}, Shell: ${shellInfo}。\n请直接返回最适合的修复命令或者脚本，无需过多解释。提供的命令必须严格包裹在 \`\`\`bash 和 \`\`\` 之间。`;
+
+  invoke<string>('ask_ai', { prompt: diagnosePrompt, systemPrompt }).then(response => {
+    const command = extractCommand(response);
+    messages.value.push({ id: Date.now().toString(), role: 'assistant', content: response, isCommand: !!command });
+  }).catch((err: any) => {
+    messages.value.push({ id: Date.now().toString(), role: 'assistant', content: `⚠️ AI 诊断调用出现故障: ${err}` });
+    emit('toast', { message: 'AI 诊断失败', type: 'error' });
+  }).finally(() => {
+    isWaiting.value = false;
+    scrollToBottom();
+  });
+}
+
+defineExpose({
+  diagnoseError
+});
+
 function parseContent(text: string): Segment[] {
   const segments: Segment[] = [];
   const regex = /```(\w*)\n?([\s\S]*?)```/g;
@@ -206,6 +234,14 @@ function parseContent(text: string): Segment[] {
   border-left: 1px solid var(--border-color, #e2e8f0);
   overflow: hidden;
   width: 320px;
+  
+  /* Detach from normal flow to prevent DOM resize jank */
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 50;
+  box-shadow: -4px 0 24px rgba(0,0,0,0.08);
 }
 
 /* Header */

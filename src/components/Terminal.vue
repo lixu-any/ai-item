@@ -1,7 +1,10 @@
 <template>
   <div class="terminal-outer" @contextmenu.prevent="onContextMenu">
-    <div class="terminal-padding-wrapper">
-      <div ref="terminalContainer" class="terminal-container"></div>
+    <div class="terminal-padding-wrapper" @click="onContainerClick">
+          <div style="position:relative; width:100%; height:100%;">
+            <div ref="terminalContainer" class="terminal-container"></div>
+            <div v-if="ghostRemainder" class="ghost-text" :style="ghostTextStyle">{{ ghostRemainder }}</div>
+          </div>
     </div>
     
     <div v-if="showSearchBar" class="terminal-search-bar animate-pop">
@@ -21,23 +24,6 @@
       </div>
     </div>
 
-    <div v-if="suggestions.length > 0" class="autocomplete-bar animate-pop">
-      <div class="ac-hint">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-        智能建议
-      </div>
-      <div class="ac-list">
-        <span 
-          v-for="(item, idx) in suggestions" 
-          :key="idx" 
-          class="ac-item" 
-          :class="{ active: idx === selectedCompIdx }"
-          @click="acceptCompletion(idx)"
-        >{{ item }}</span>
-      </div>
-      <div class="ac-shortcuts">按 <kbd>Tab</kbd> 或 <kbd>→</kbd> 补全 · <kbd>↑</kbd><kbd>↓</kbd> 切换 · <kbd>Esc</kbd> 关闭</div>
-    </div>
-
     <ContextMenu
       v-model:visible="showMenu"
       :x="menuX"
@@ -49,7 +35,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue';
+import { ref, shallowRef, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -72,12 +58,14 @@ const props = defineProps<{
 const terminalContainer = ref<HTMLElement | null>(null);
 let term: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
-const searchAddon = ref<SearchAddon | null>(null);
+const searchAddon = shallowRef<SearchAddon | null>(null);
+let webglAddon: WebglAddon | null = null;
 let unlisten: UnlistenFn | null = null;
 let unlistenSettings: UnlistenFn | null = null;
 let resizeObserver: ResizeObserver | null = null;
+let resizeTimer: any = null;
 
-const emit = defineEmits(['data', 'resize', 'zmodem-detect', 'zmodem-sz']);
+const emit = defineEmits(['data', 'resize', 'zmodem-detect', 'zmodem-sz', 'ai-diagnose']);
 
 const showMenu = ref(false);
 const menuX = ref(0);
@@ -91,7 +79,6 @@ const searchInputRef = ref<HTMLInputElement | null>(null);
 // ---- Auto Completion (智能提示) ----
 const autoCompletionEnabled = ref(true);
 const suggestions = ref<string[]>([]);
-const selectedCompIdx = ref(0);
 let currentInputStr = '';
 let lastSubmittedCmd = '';
 let lastSeenCwd = '~'; // Track cwd from terminal prompt
@@ -100,6 +87,7 @@ let compTimeout: any = null;
 
 // Mock list of common commands for basic completion
 const COMMON_CMDS = [
+  'echo "hello world"', 'echo test', 'cd /var/log', 'cd /etc',
   'ls -la', 'cd ..', 'pwd', 'clear', 'exit', 'history',
   'git status', 'git add -A', 'git commit -m ""', 'git pull', 'git push',
   'docker ps', 'docker-compose up -d', 'docker images',
@@ -122,28 +110,62 @@ async function fetchCompletions() {
     const matches = COMMON_CMDS.filter(c => c.startsWith(q) && c !== q);
     
     const combined = [...new Set([...backendSuggestions, ...matches])];
-    suggestions.value = combined.slice(0, 5); // display up to 5
-    selectedCompIdx.value = 0;
+    suggestions.value = combined.slice(0, 5); // take best matches
+    updateGhostTextPosition();
   } catch (err) {
     console.error('Failed to fetch completions', err);
     suggestions.value = [];
   }
 }
 
-function acceptCompletion(idx: number) {
-  if (!suggestions.value[idx] || !term) return;
-  const item = suggestions.value[idx];
-  // Calculate what's missing
-  const remainder = item.substring(currentInputStr.length);
-  if (remainder) {
-    sendDataToBackend(remainder);
+const ghostRemainder = computed(() => {
+  if (suggestions.value.length === 0) return '';
+  const item = suggestions.value[0];
+  if (item.toLowerCase().startsWith(currentInputStr.toLowerCase()) && currentInputStr.length > 0) {
+    return item.substring(currentInputStr.length);
   }
-  currentInputStr = item; // update tracker
+  return '';
+});
+
+const ghostTextStyle = ref<Record<string, string>>({
+  left: '0px',
+  top: '0px',
+  fontSize: '14px',
+  fontFamily: 'monospace',
+  lineHeight: '1.2'
+});
+
+function updateGhostTextPosition() {
+  if (!term || !terminalContainer.value) return;
+  const cw = terminalContainer.value.clientWidth / term.cols;
+  const ch = terminalContainer.value.clientHeight / term.rows;
+  
+  const buf = term.buffer.active;
+  ghostTextStyle.value = {
+    left: `${buf.cursorX * cw}px`,
+    top: `${buf.cursorY * ch}px`,
+    height: `${ch}px`,
+    fontSize: `${term.options.fontSize}px`,
+    fontFamily: term.options.fontFamily || 'monospace',
+    lineHeight: `${ch}px`
+  };
+}
+
+function acceptCompletion() {
+  const remainder = ghostRemainder.value;
+  if (!remainder || !term) return;
+  sendDataToBackend(remainder);
+  currentInputStr += remainder; // update tracker
   suggestions.value = [];
 }
 
 
 // ---- Session 录制 ----
+// ---- Focus Handling ----
+function onContainerClick() {
+  if (props.isActive) term?.focus();
+}
+
 const isRecording = ref(false);
 let recordStartTime = 0;
 let recordBuffer: [number, string][] = []; // [elapsed_sec, text]
@@ -194,6 +216,7 @@ onMounted(async () => {
   const savedFontFamily = await invoke<string | null>('get_setting', { key: 'term_font_family'  }).catch(() => null);
   const savedCursor     = await invoke<string | null>('get_setting', { key: 'term_cursor_style' }).catch(() => null);
   const savedAutoComp   = await invoke<string | null>('get_setting', { key: 'term_auto_completion'}).catch(() => null);
+  const savedRenderer   = await invoke<string | null>('get_setting', { key: 'term_renderer'       }).catch(() => null);
 
   const fontSize   = savedFontSize   ? parseInt(savedFontSize)     : 14;
   const lineHeight = savedLineHeight ? parseFloat(savedLineHeight)  : 1.2;
@@ -236,13 +259,22 @@ onMounted(async () => {
 
   term.open(terminalContainer.value);
   
-  // 尝试加载 WebGL 加速
-  try {
-    const webglAddon = new WebglAddon();
-    term.loadAddon(webglAddon);
-  } catch (e) {}
+  // 仅在明确选择 WebGL 或默认时加载
+  if (savedRenderer === 'webgl' || !savedRenderer) {
+    try {
+      webglAddon = new WebglAddon();
+      webglAddon.onContextLoss(() => {
+        console.warn('Xterm WebGL context lost, disposing addon to fallback to DOM renderer.');
+        webglAddon?.dispose();
+        webglAddon = null;
+      });
+      term.loadAddon(webglAddon);
+    } catch (e) {
+      console.warn('WebGL addon failed to load, falling back to DOM renderer', e);
+      webglAddon = null;
+    }
+  }
   
-  let resizeTimer: any = null;
   resizeObserver = new ResizeObserver(() => {
     if (props.isActive && fitAddon) {
       if (resizeTimer) clearTimeout(resizeTimer);
@@ -258,17 +290,13 @@ onMounted(async () => {
 
   // 拦截特定的前端按键，处理自动补全下拉框逻辑
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-    if (suggestions.value.length > 0 && e.type === 'keydown') {
-      if (e.key === 'Tab' || e.key === 'ArrowRight') {
-        acceptCompletion(selectedCompIdx.value);
+    if (ghostRemainder.value && e.type === 'keydown') {
+      if (e.key === 'ArrowRight') {
+        acceptCompletion();
         e.preventDefault();
         return false;
-      } else if (e.key === 'ArrowDown') {
-        selectedCompIdx.value = (selectedCompIdx.value + 1) % suggestions.value.length;
-        e.preventDefault();
-        return false;
-      } else if (e.key === 'ArrowUp') {
-        selectedCompIdx.value = (selectedCompIdx.value - 1 + suggestions.value.length) % suggestions.value.length;
+      } else if (e.key === 'Tab') {
+        acceptCompletion();
         e.preventDefault();
         return false;
       } else if (e.key === 'Escape') {
@@ -342,9 +370,7 @@ onMounted(async () => {
     emit('resize', size);
   });
 
-  terminalContainer.value.addEventListener('click', () => {
-    if (props.isActive) term?.focus();
-  });
+  // Vue @click handler on terminal-padding-wrapper takes care of focus now.
 
   term.write('\x1b[1;32mNixu\x1b[0m 终端就绪... ');
   if (props.sessionId) {
@@ -360,9 +386,10 @@ onMounted(async () => {
     fontFamily: string;
     cursorStyle: 'block' | 'underline' | 'bar';
     autoCompletion?: boolean;
+    renderer?: 'webgl' | 'dom';
   }>('terminal-settings-changed', (event) => {
     if (!term) return;
-    const { fontSize, lineHeight, fontFamily, cursorStyle, autoCompletion } = event.payload;
+    const { fontSize, lineHeight, fontFamily, cursorStyle, autoCompletion, renderer } = event.payload;
     term.options.fontSize    = fontSize;
     term.options.lineHeight  = lineHeight;
     term.options.fontFamily  = fontFamily;
@@ -370,6 +397,21 @@ onMounted(async () => {
     if (autoCompletion !== undefined) {
       autoCompletionEnabled.value = autoCompletion;
       if (!autoCompletion) suggestions.value = [];
+    }
+    if (renderer !== undefined) {
+      if (renderer === 'webgl' && !webglAddon) {
+        try {
+          webglAddon = new WebglAddon();
+          webglAddon.onContextLoss(() => { webglAddon?.dispose(); webglAddon = null; });
+          term.loadAddon(webglAddon);
+        } catch (e) {
+          console.warn('WebGL enable failed', e);
+          webglAddon = null;
+        }
+      } else if (renderer === 'dom' && webglAddon) {
+        webglAddon.dispose();
+        webglAddon = null;
+      }
     }
     setTimeout(() => { try { fitAddon?.fit(); } catch(e){} }, 50);
   });
@@ -513,6 +555,8 @@ function onContextMenu(e: MouseEvent) {
     { label: '粘贴', icon: '📥', action: 'paste', shortcut: '⌘V' },
     { label: '粘贴选中', icon: '🖱️', action: 'pasteSelection', disabled: !hasSelection },
     { divider: true },
+    { label: '🤖 AI 诊断', icon: '🤖', action: 'ai_diagnose', disabled: !hasSelection },
+    { divider: true },
     { label: '查找', icon: '🔍', action: 'find', shortcut: '⌘F' },
     { divider: true },
     { label: '清空缓存', icon: '🧹', action: 'clear' },
@@ -539,6 +583,11 @@ async function handleMenuAction(action: string) {
     case 'pasteSelection':
       if (term.hasSelection()) {
         sendDataToBackend(term.getSelection());
+      }
+      break;
+    case 'ai_diagnose':
+      if (term.hasSelection()) {
+        emit('ai-diagnose', term.getSelection());
       }
       break;
     case 'find':
@@ -603,10 +652,27 @@ watch(() => props.sessionId, (newId) => {
 });
 
 onBeforeUnmount(() => {
+  // Disconnect observers and listeners
   if (resizeObserver) resizeObserver.disconnect();
   if (unlisten) unlisten();
   if (unlistenSettings) unlistenSettings();
+  
+  // Clear any pending timers
+  if (resizeTimer) clearTimeout(resizeTimer);
+  if (compTimeout) clearTimeout(compTimeout);
+
+  // Strictly dispose all active Xterm Addons first to free memory
+  if (fitAddon) { fitAddon.dispose(); fitAddon = null; }
+  if (searchAddon.value) { searchAddon.value.dispose(); searchAddon.value = null; }
+  if (webglAddon) { webglAddon.dispose(); webglAddon = null; }
+
+  // Clear suggestions completely
+  suggestions.value = [];
+  autoCompletionEnabled.value = false;
+
+  // Finally dispose the main Terminal instance
   term?.dispose();
+  term = null;
 });
 
 defineExpose({
@@ -643,6 +709,16 @@ defineExpose({
   height: 100%;
   overflow: hidden;
   cursor: text;
+}
+
+.ghost-text {
+  position: absolute;
+  color: rgba(255, 255, 255, 0.4);
+  pointer-events: none;
+  z-index: 10;
+  white-space: pre;
+  display: flex;
+  align-items: center;
 }
 
 .terminal-search-bar {

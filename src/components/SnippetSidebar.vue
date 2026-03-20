@@ -189,6 +189,14 @@ onMounted(loadSnippets);
   display: flex;
   flex-direction: column;
   height: 100%;
+  
+  /* Detach from normal flow to prevent DOM resize jank */
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 50;
+  box-shadow: -4px 0 24px rgba(0,0,0,0.08);
 }
 
 

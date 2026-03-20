@@ -32,6 +32,7 @@ const termFontFamily = ref('"Cascadia Code", Menlo, Monaco, monospace');
 const termCursorStyle = ref<'block' | 'underline' | 'bar'>('block');
 const tabTitleMode = ref<'ip' | 'name'>('ip');
 const termAutoCompletion = ref(true);
+const termRenderer = ref<'dom' | 'webgl'>('webgl');
 
 // ---- 系统字体 ----
 const systemFonts = ref<string[]>([]);
@@ -102,6 +103,9 @@ async function loadSettings() {
     const autoCompStr = await invoke<string | null>('get_setting', { key: 'term_auto_completion' });
     termAutoCompletion.value = autoCompStr !== 'false'; // default true
 
+    const rendererStr = await invoke<string | null>('get_setting', { key: 'term_renderer' });
+    termRenderer.value = (rendererStr as any) || 'webgl';
+
     const timeout = await invoke<string | null>('get_setting', { key: 'ssh_connect_timeout' });
     sshTimeout.value = timeout ? parseInt(timeout) : 15;
 
@@ -124,6 +128,7 @@ async function saveSettings() {
     await invoke('save_setting', { key: 'term_cursor_style', value: termCursorStyle.value });
     await invoke('save_setting', { key: 'tab_title_mode', value: tabTitleMode.value });
     await invoke('save_setting', { key: 'term_auto_completion', value: String(termAutoCompletion.value) });
+    await invoke('save_setting', { key: 'term_renderer', value: termRenderer.value });
     await invoke('save_setting', { key: 'ssh_connect_timeout', value: String(sshTimeout.value) });
     await invoke('save_setting', { key: 'ssh_keepalive', value: String(sshKeepalive.value) });
 
@@ -134,6 +139,7 @@ async function saveSettings() {
       fontFamily: termFontFamily.value,
       cursorStyle: termCursorStyle.value,
       autoCompletion: termAutoCompletion.value,
+      renderer: termRenderer.value,
     });
 
     emit('toast', { message: '设置已保存', type: 'success' });
@@ -432,6 +438,29 @@ onMounted(() => {
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20"/></svg>
                   IP 地址
                   <span class="opt-example">root@152.x.x.x</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 渲染引擎 -->
+          <div class="section">
+            <div class="section-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+              渲染引擎
+            </div>
+            <div class="form-field">
+              <label>终端底层渲染技术</label>
+              <div class="toggle-opts">
+                <button class="toggle-opt" :class="{ active: termRenderer === 'webgl' }" @click="termRenderer = 'webgl'">
+                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+                  WebGL 加速
+                  <span class="opt-example">性能强劲，适合海量日志</span>
+                </button>
+                <button class="toggle-opt" :class="{ active: termRenderer === 'dom' }" @click="termRenderer = 'dom'">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+                  DOM 渲染
+                  <span class="opt-example">兼容绝佳，预防花屏显示</span>
                 </button>
               </div>
             </div>
