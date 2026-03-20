@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import SvgIcon from './SvgIcon.vue';
+import ContextMenu, { MenuItem } from './ContextMenu.vue';
 
 interface Host {
   id?: number;
@@ -105,6 +106,60 @@ function onDrop(event: DragEvent, groupId: number | null) {
   const hostId = parseInt(hostIdStr);
   emit('drop-host', hostId, groupId);
 }
+
+const showMenu = ref(false);
+const menuX = ref(0);
+const menuY = ref(0);
+const menuItems = ref<MenuItem[]>([]);
+const contextTargetType = ref<'host' | 'group' | null>(null);
+const contextTargetData = ref<Host | Group | null>(null);
+
+function openHostMenu(e: MouseEvent, h: Host) {
+  contextTargetType.value = 'host';
+  contextTargetData.value = h;
+  menuItems.value = [
+    { label: '连接', action: 'connect', icon: '▶️' },
+    { label: '编辑', action: 'edit', icon: '✏️' },
+    { divider: true },
+    { label: '删除', action: 'delete', icon: '🗑️', danger: true },
+  ];
+  menuX.value = e.clientX;
+  menuY.value = e.clientY;
+  showMenu.value = true;
+}
+
+function openGroupMenu(e: MouseEvent, g: Group) {
+  contextTargetType.value = 'group';
+  contextTargetData.value = g;
+  const count = groupHostCount(g.id!);
+  menuItems.value = [
+    { label: '编辑', action: 'edit', icon: '✏️' },
+    { divider: true },
+    {
+      label: '删除',
+      action: 'delete',
+      icon: '🗑️',
+      danger: true,
+      disabled: count > 0 // 有内容的目录不允许删除
+    },
+  ];
+  menuX.value = e.clientX;
+  menuY.value = e.clientY;
+  showMenu.value = true;
+}
+
+function handleMenuAction(action: string) {
+  if (contextTargetType.value === 'host') {
+    const h = contextTargetData.value as Host;
+    if (action === 'connect') emit('connect', h);
+    if (action === 'edit') emit('edit-host', h);
+    if (action === 'delete') emit('delete-host', h.id!);
+  } else if (contextTargetType.value === 'group') {
+    const g = contextTargetData.value as Group;
+    if (action === 'edit') emit('edit-group', g);
+    if (action === 'delete') emit('delete-group', g.id!);
+  }
+}
 </script>
 
 <template>
@@ -142,6 +197,7 @@ function onDrop(event: DragEvent, groupId: number | null) {
         :key="`recent-${h.id}`"
         class="recent-item"
         @click="$emit('connect', h)"
+        @contextmenu.prevent="openHostMenu($event, h)"
         :title="`双击连接 ${h.name}`"
       >
         <div class="host-avatar recent-avatar" :style="{ background: hostAvatarColor(h.name) }">
@@ -152,110 +208,89 @@ function onDrop(event: DragEvent, groupId: number | null) {
           <span class="host-name">{{ h.name }}</span>
           <span class="host-addr">{{ h.username }}@{{ h.host }}</span>
         </div>
-        <button class="recent-connect-btn" @click.stop="$emit('connect', h)" title="连接">
-          <SvgIcon name="play" size="12" />
-        </button>
       </div>
     </div>
 
     <div class="host-list">
       <!-- 渲染分组及其主机 -->
-      <div v-for="g in groups" :key="g.id!" 
-        v-show="!searchQuery || filteredHosts().some(h => h.group_id === g.id)"
-        class="group-section"
-        :class="{ collapsed: isGroupCollapsed(g.id!) }"
-        @dragover.prevent
-        @drop="onDrop($event, g.id!)"
-      >
-        <div class="group-header" @click="toggleGroup(g.id!)">
-          <span class="chevron">›</span>
-          <SvgIcon name="group" size="15" class="folder-icon" />
-          <span class="group-name">{{ g.name }}</span>
-          <div class="group-actions">
-            <button class="icon-btn" @click.stop="$emit('edit-group', g)" title="编辑分组">
-              <SvgIcon name="edit" size="13" />
-            </button>
-            <button class="icon-btn delete-btn" @click.stop="$emit('delete-group', g.id!)" title="删除分组">
-              <SvgIcon name="delete" size="13" />
-            </button>
+      <transition-group name="list" tag="div" class="host-groups-wrapper">
+        <div v-for="g in groups" :key="'group-'+g.id" 
+          v-show="!searchQuery || filteredHosts().some(h => h.group_id === g.id)"
+          class="group-section"
+          :class="{ collapsed: isGroupCollapsed(g.id!) }"
+          @dragover.prevent
+          @drop="onDrop($event, g.id!)"
+        >
+          <div class="group-header" @click="toggleGroup(g.id!)" @contextmenu.prevent="openGroupMenu($event, g)">
+            <span class="chevron">›</span>
+            <SvgIcon name="group" size="15" class="folder-icon" />
+            <span class="group-name">{{ g.name }}</span>
+            <span class="group-count">{{ groupHostCount(g.id!) }}</span>
           </div>
-          <span class="group-count">{{ groupHostCount(g.id!) }}</span>
+          <transition name="fade-slide">
+            <div class="group-content-wrapper" v-show="!isGroupCollapsed(g.id!) || !!searchQuery">
+              <transition-group name="list" tag="div" class="group-content">
+                <div
+                  v-for="h in filteredHosts().filter((h: Host) => h.group_id === g.id)"
+                  :key="'host-'+h.id"
+                  class="host-card"
+                  @dblclick="$emit('connect', h)"
+                  @contextmenu.prevent="openHostMenu($event, h)"
+                  draggable="true"
+                  @dragstart="onDragStart($event, h.id!)"
+                >
+                  <div class="host-avatar" :style="{ background: hostAvatarColor(h.name) }">
+                    {{ hostAvatarText(h.name) }}
+                    <span v-if="isHostActive(h)" class="avatar-online"></span>
+                  </div>
+                  <div class="host-meta">
+                    <span class="host-name">{{ h.name }}</span>
+                    <span class="host-addr">{{ h.username }}@{{ h.host }}</span>
+                  </div>
+                </div>
+              </transition-group>
+            </div>
+          </transition>
         </div>
-        <div class="group-content" v-show="!isGroupCollapsed(g.id!) || searchQuery">
-          <div
-            v-for="h in filteredHosts().filter((h: Host) => h.group_id === g.id)"
-            :key="h.id!"
-            class="host-card"
-            @dblclick="$emit('connect', h)"
-            draggable="true"
-            @dragstart="onDragStart($event, h.id!)"
-          >
-            <div class="host-avatar" :style="{ background: hostAvatarColor(h.name) }">
-              {{ hostAvatarText(h.name) }}
-              <span v-if="isHostActive(h)" class="avatar-online"></span>
-            </div>
-            <div class="host-meta">
-              <span class="host-name">{{ h.name }}</span>
-              <span class="host-addr">{{ h.username }}@{{ h.host }}</span>
-            </div>
-            <div class="host-actions">
-              <button class="icon-btn" @click.stop="$emit('connect', h)" title="连接">
-                <SvgIcon name="play" size="13" />
-              </button>
-              <button class="icon-btn" @click.stop="$emit('edit-host', h)" title="编辑">
-                <SvgIcon name="edit" size="13" />
-              </button>
-              <button class="icon-btn delete-btn" @click.stop="$emit('delete-host', h.id!)" title="删除">
-                <SvgIcon name="delete" size="13" />
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
 
-      <!-- 未分组主机 -->
-      <div v-if="filteredHosts().some(h => !h.group_id)" class="group-section"
-        :class="{ collapsed: collapsedUnGrouped }"
-        @dragover.prevent
-        @drop="onDrop($event, null)"
-      >
-        <div class="group-header" @click="collapsedUnGrouped = !collapsedUnGrouped">
-          <span class="chevron">›</span>
-          <SvgIcon name="group" size="15" class="folder-icon" />
-          <span class="group-name">未分组</span>
-          <span class="group-count">{{ groupHostCount(null) }}</span>
-        </div>
-        <div class="group-content" v-show="!collapsedUnGrouped || searchQuery">
-          <div
-            v-for="h in filteredHosts().filter((h: Host) => !h.group_id)"
-            :key="h.id!"
-            class="host-card"
-            @dblclick="$emit('connect', h)"
-            draggable="true"
-            @dragstart="onDragStart($event, h.id!)"
-          >
-            <div class="host-avatar" :style="{ background: hostAvatarColor(h.name) }">
-              {{ hostAvatarText(h.name) }}
-              <span v-if="isHostActive(h)" class="avatar-online"></span>
-            </div>
-            <div class="host-meta">
-              <span class="host-name">{{ h.name }}</span>
-              <span class="host-addr">{{ h.username }}@{{ h.host }}</span>
-            </div>
-            <div class="host-actions">
-              <button class="icon-btn" @click.stop="$emit('connect', h)" title="连接">
-                <SvgIcon name="play" size="13" />
-              </button>
-              <button class="icon-btn" @click.stop="$emit('edit-host', h)" title="编辑">
-                <SvgIcon name="edit" size="13" />
-              </button>
-              <button class="icon-btn delete-btn" @click.stop="$emit('delete-host', h.id!)" title="删除">
-                <SvgIcon name="delete" size="13" />
-              </button>
-            </div>
+        <!-- 未分组主机 -->
+        <div v-if="filteredHosts().some(h => !h.group_id)" class="group-section" :key="'group-ungrouped'"
+          :class="{ collapsed: collapsedUnGrouped }"
+          @dragover.prevent
+          @drop="onDrop($event, null)"
+        >
+          <div class="group-header" @click="collapsedUnGrouped = !collapsedUnGrouped">
+            <span class="chevron">›</span>
+            <SvgIcon name="group" size="15" class="folder-icon" />
+            <span class="group-name">未分组</span>
+            <span class="group-count">{{ groupHostCount(null) }}</span>
           </div>
+          <transition name="fade-slide">
+            <div class="group-content-wrapper" v-show="!collapsedUnGrouped || !!searchQuery">
+              <transition-group name="list" tag="div" class="group-content">
+                <div
+                  v-for="h in filteredHosts().filter((h: Host) => !h.group_id)"
+                  :key="'host-'+h.id"
+                  class="host-card"
+                  @dblclick="$emit('connect', h)"
+                  @contextmenu.prevent="openHostMenu($event, h)"
+                  draggable="true"
+                  @dragstart="onDragStart($event, h.id!)"
+                >
+                  <div class="host-avatar" :style="{ background: hostAvatarColor(h.name) }">
+                    {{ hostAvatarText(h.name) }}
+                    <span v-if="isHostActive(h)" class="avatar-online"></span>
+                  </div>
+                  <div class="host-meta">
+                    <span class="host-name">{{ h.name }}</span>
+                    <span class="host-addr">{{ h.username }}@{{ h.host }}</span>
+                  </div>
+                </div>
+              </transition-group>
+            </div>
+          </transition>
         </div>
-      </div>
+      </transition-group>
 
       <div v-if="filteredHosts().length === 0 && searchQuery" class="empty-state">
         <SvgIcon name="search" size="48" class="empty-icon" />
@@ -292,9 +327,269 @@ function onDrop(event: DragEvent, groupId: number | null) {
         <span>设置</span>
       </div>
     </div>
+    <ContextMenu 
+      v-model:visible="showMenu"
+      :x="menuX"
+      :y="menuY"
+      :items="menuItems"
+      @action="handleMenuAction"
+    />
   </aside>
 </template>
 
 <style scoped>
-/* Keeping scoped empty for now, relying on global App.vue styles */
+/* Animation for list items */
+.list-enter-active, .list-leave-active {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.list-enter-from, .list-leave-to {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+.list-leave-active {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.fade-slide-enter-active, .fade-slide-leave-active {
+  transition: max-height 0.3s ease-in-out, opacity 0.3s ease-in-out;
+  overflow: hidden;
+  max-height: 1000px;
+}
+.fade-slide-enter-from, .fade-slide-leave-to {
+  opacity: 0;
+  max-height: 0;
+}
+
+/* Sidebar Local Overrides */
+.search-container {
+  padding: 0 12px 16px;
+}
+.search-input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.search-icon {
+  position: absolute;
+  left: 10px;
+  font-size: 0.75rem;
+  opacity: 0.5;
+}
+.search-input-wrapper input {
+  width: 100%;
+  background: var(--bg-dark);
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 8px 30px 8px 28px;
+  color: var(--text-main);
+  font-size: 0.75rem;
+  box-sizing: border-box;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.02);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.search-input-wrapper input:focus { 
+  border-color: rgba(14, 165, 233, 0.4); 
+  background: #ffffff;
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.03), 0 0 0 3px rgba(14, 165, 233, 0.15);
+  outline: none; 
+}
+.clear-search {
+  position: absolute; 
+  right: 10px; 
+  color: var(--text-dim); 
+  cursor: pointer; 
+  font-size: 0.9rem;
+}
+
+.host-list {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px;
+  position: relative;
+}
+
+ 
+
+.group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.group-header:hover { 
+  background: rgba(0, 0, 0, 0.04); 
+}
+
+.chevron {
+  font-size: 1rem;
+  color: var(--text-dim);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  width: 12px;
+  display: flex;
+  justify-content: center;
+  transform: rotate(90deg);
+}
+.collapsed .chevron { transform: rotate(0deg); }
+
+.folder-icon { 
+  opacity: 0.8; 
+  color: var(--accent-color);
+}
+
+.group-name { 
+  flex: 1; 
+  min-width: 0;
+  overflow: hidden; 
+  text-overflow: ellipsis; 
+  white-space: nowrap; 
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--text-main);
+  opacity: 0.9;
+}
+.group-count {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  background: rgba(0, 0, 0, 0.05);
+  padding: 2px 6px;
+  border-radius: 12px;
+  font-weight: 600;
+}
+
+/* Host Card Polihing */
+.host-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 3px 12px;
+  cursor: pointer;
+  border-radius: 10px; /* Reduced from full width to rounded card */
+  border: 1px solid transparent;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  background: transparent;
+}
+.host-card:hover {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.03);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.03), 0 1px 2px rgba(0,0,0,0.01);
+  transform: scale(0.99); /* Press/Hover elasticity */
+}
+
+/* Avatar Polish */
+.host-avatar {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 700;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+  box-shadow: inset 0 -2px 4px rgba(0,0,0,0.15), 0 2px 4px rgba(0,0,0,0.1);
+  text-shadow: 0 1px 2px rgba(0,0,0,0.2);
+}
+.avatar-online {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  width: 10px;
+  height: 10px;
+  background-color: var(--success);
+  border: 2px solid white;
+  border-radius: 50%;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+}
+
+/* Host Meta */
+.host-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.host-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.host-addr {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+
+/* Sidebar Footer */
+.sidebar-footer {
+  padding: 12px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  border-top: 1px solid var(--border-color);
+  background: rgba(255,255,255,0.3);
+}
+.footer-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  cursor: pointer;
+  color: var(--text-dim);
+  border-radius: 8px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.footer-item.active { background: rgba(14, 165, 233, 0.1); color: var(--accent-color); }
+.footer-item.active .footer-icon { color: var(--accent-color); }
+.footer-item:hover { background: rgba(0,0,0,0.04); color: var(--text-main); }
+.footer-icon { opacity: 0.7; font-size: 1rem; }
+.footer-item span { font-size: 0.75rem; font-weight: 500; }
+
+/* Empty state styling override */
+.empty-state {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; padding: 40px 20px; color: var(--text-dim);
+  text-align: center;
+}
+.empty-icon { font-size: 2rem; margin-bottom: 12px; opacity: 0.5; }
+.empty-state p { font-size: 0.85rem; margin: 0; font-weight: 500;}
+
+/* Recent Section */
+.recent-section {
+  padding: 0 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 10px;
+}
+.recent-header {
+  font-size: 0.75rem; font-weight: 700; color: var(--text-dim);
+  margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.recent-item {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px; cursor: pointer;
+  border-radius: 8px; transition: all 0.2s;
+  background: transparent;
+}
+.recent-item:hover { 
+  background: #ffffff; 
+  transform: scale(0.99);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
+.recent-avatar { width: 30px; height: 30px; font-size: 0.8rem; border-radius: 8px;}
+.clear-recent-btn {
+  background: none; border: none; color: var(--text-dim); font-size: 0.7rem; cursor: pointer; display: flex; align-items: center; gap: 3px; padding: 2px 6px; border-radius: 4px; transition: 0.2s;
+}
+.clear-recent-btn:hover { background: rgba(0,0,0,0.06); color: var(--text-main); }
 </style>

@@ -346,7 +346,7 @@ onMounted(async () => {
     if (props.isActive) term?.focus();
   });
 
-  term.writeln('\x1b[1;32mNixu\x1b[0m 终端就绪...');
+  term.write('\x1b[1;32mNixu\x1b[0m 终端就绪... ');
   if (props.sessionId) {
     setupSessionListener(props.sessionId);
   } else {

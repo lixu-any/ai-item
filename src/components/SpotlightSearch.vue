@@ -188,7 +188,7 @@ const confirm = () => {
   font-size: 1rem;
   background: transparent;
   color: #333;
-  padding: 4px 0;
+  padding: 4px 8px; /* Added slight left/right padding for aesthetics */
 }
 
 .results-list {

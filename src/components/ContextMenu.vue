@@ -1,29 +1,31 @@
 <template>
-  <div 
-    v-if="visible" 
-    class="context-menu" 
-    :style="{ top: `${y}px`, left: `${x}px` }"
-    @click.stop
-    @contextmenu.prevent
-  >
+  <Teleport to="body">
     <div 
-      v-for="(item, index) in items" 
-      :key="index"
-      class="menu-item-wrapper"
+      v-if="visible" 
+      class="context-menu" 
+      :style="{ top: `${y}px`, left: `${x}px` }"
+      @click.stop
+      @contextmenu.prevent
     >
-      <div v-if="item.divider" class="menu-divider"></div>
       <div 
-        v-else 
-        class="menu-item" 
-        :class="{ 'disabled': item.disabled, 'danger': item.danger, 'active': item.active }"
-        @click="handleAction(item)"
+        v-for="(item, index) in items" 
+        :key="index"
+        class="menu-item-wrapper"
       >
-        <span v-if="item.icon" class="item-icon">{{ item.icon }}</span>
-        <span class="item-label">{{ item.label }}</span>
-        <span v-if="item.shortcut" class="item-shortcut">{{ item.shortcut }}</span>
+        <div v-if="item.divider" class="menu-divider"></div>
+        <div 
+          v-else 
+          class="menu-item" 
+          :class="{ 'disabled': item.disabled, 'danger': item.danger, 'active': item.active }"
+          @click="handleAction(item)"
+        >
+          <span v-if="item.icon" class="item-icon">{{ item.icon }}</span>
+          <span class="item-label">{{ item.label }}</span>
+          <span v-if="item.shortcut" class="item-shortcut">{{ item.shortcut }}</span>
+        </div>
       </div>
     </div>
-  </div>
+  </Teleport>
 </template>
 
 <script setup lang="ts">

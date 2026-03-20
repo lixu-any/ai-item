@@ -205,6 +205,7 @@ function parseContent(text: string): Segment[] {
   background: var(--bg-sidebar, #f8f9fa);
   border-left: 1px solid var(--border-color, #e2e8f0);
   overflow: hidden;
+  width: 320px;
 }
 
 /* Header */
