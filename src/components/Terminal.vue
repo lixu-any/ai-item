@@ -4,6 +4,26 @@
           <div style="position:relative; width:100%; height:100%;">
             <div ref="terminalContainer" class="terminal-container"></div>
             <div v-if="ghostRemainder" class="ghost-text" :style="ghostTextStyle">{{ ghostRemainder }}</div>
+            
+            <div v-if="aiLockedCmd" class="ai-lock-overlay animate-pop">
+              <div class="lock-box">
+                <div class="lock-header">
+                  <svg viewBox="0 0 24 24" fill="none" class="lock-icon" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4m0 4h.01"/></svg>
+                  <h3>[安全结界] 高危指令拦截</h3>
+                </div>
+                <p class="lock-desc">您正准备执行具有毁灭性的操作：</p>
+                <div class="lock-cmd"><span>{{ aiLockedCmd }}</span></div>
+                <div class="lock-actions">
+                  <input 
+                    v-model="aiLockConfirmText" 
+                    placeholder="输入 I AM SURE 放行" 
+                    @keydown.enter="confirmAiLock"
+                    class="lock-input"
+                  />
+                  <button class="lock-btn safe" @click="cancelAiLock">撤回销毁操作</button>
+                </div>
+              </div>
+            </div>
           </div>
     </div>
     
@@ -84,6 +104,39 @@ let lastSubmittedCmd = '';
 let lastSeenCwd = '~'; // Track cwd from terminal prompt
 let zmodemCooldown = false; // Prevent re-triggering after abort
 let compTimeout: any = null;
+
+// ---- 高危死锁拦截 ----
+const aiLockedCmd = ref('');
+const aiLockConfirmText = ref('');
+
+const DANGEROUS_PATTERNS = [
+  /\brm\s+-r?[fF]?\s+\//,         // rm -rf /
+  /\bmkfs\./,                     // format disk
+  /\bdd\s+if=.*of=\/dev\//,       // overwrite block device
+  /\bdrop\s+database\b/i,         // drop database
+  /\btruncate\s+table\b/i,        // truncate table
+  /\bflushall\b/i,                // redis flushall
+];
+
+function isCommandDangerous(cmd: string) {
+  return DANGEROUS_PATTERNS.some(p => p.test(cmd));
+}
+
+function cancelAiLock() {
+  aiLockedCmd.value = '';
+  aiLockConfirmText.value = '';
+  sendDataToBackend('\x03'); // Send Ctrl+C to abort line in terminal!
+  currentInputStr = ''; // reset local tracker
+}
+
+function confirmAiLock() {
+  if (aiLockConfirmText.value === 'I AM SURE') {
+    sendDataToBackend('\r'); // release the enter key!
+    aiLockedCmd.value = '';
+    aiLockConfirmText.value = '';
+    currentInputStr = ''; // reset local tracker
+  }
+}
 
 // Mock list of common commands for basic completion
 const COMMON_CMDS = [
@@ -310,6 +363,19 @@ onMounted(async () => {
 
   // 处理输入
   term.onData(async (data) => {
+    // 触发前置死锁拦截
+    if (data === '\r' || data === '\n') {
+      if (isCommandDangerous(currentInputStr) && !aiLockedCmd.value) {
+        aiLockedCmd.value = currentInputStr;
+        return; // BLOCK SENDING ENTER!
+      }
+    }
+    
+    // 如果已经被锁死，屏蔽任何终端输入
+    if (aiLockedCmd.value) {
+      return;
+    }
+
     // 粗略跟踪输入，如果不精确，可后续改进
     if (data === '\r' || data === '\n' || data === '\x03' /* Ctrl+C */) {
       // Read the actual command from xterm buffer (captures Tab completion too)
@@ -720,6 +786,73 @@ defineExpose({
   display: flex;
   align-items: center;
 }
+
+.ai-lock-overlay {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(15, 0, 0, 0.85);
+  backdrop-filter: blur(4px);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lock-box {
+  background: #1a0505;
+  border: 1px solid #ef4444;
+  border-radius: 8px;
+  padding: 24px;
+  width: 400px;
+  box-shadow: 0 0 40px rgba(239, 68, 68, 0.2);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.lock-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #ef4444;
+}
+.lock-icon { width: 28px; height: 28px; }
+.lock-header h3 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: 1px; }
+.lock-desc { color: #fca5a5; font-size: 14px; margin: 0; }
+.lock-cmd {
+  background: #000;
+  border-left: 3px solid #ef4444;
+  padding: 12px;
+  font-family: monospace;
+  color: #f87171;
+  word-break: break-all;
+}
+.lock-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+}
+.lock-input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #fff;
+  padding: 0 12px;
+  border-radius: 4px;
+  font-family: monospace;
+  outline: none;
+}
+.lock-input:focus { border-color: #ef4444; }
+.lock-btn.safe {
+  background: #3b82f6;
+  color: #fff;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+.lock-btn.safe:hover { background: #2563eb; }
 
 .terminal-search-bar {
   position: absolute;
