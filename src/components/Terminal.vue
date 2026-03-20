@@ -5,7 +5,7 @@
             <div ref="terminalContainer" class="terminal-container"></div>
             <div v-if="ghostRemainder" class="ghost-text" :style="ghostTextStyle">{{ ghostRemainder }}</div>
             
-            <div v-if="aiLockedCmd" class="ai-lock-overlay animate-pop">
+            <div v-if="aiLockedCmd" class="ai-lock-overlay animate-pop" @click.stop>
               <div class="lock-box">
                 <div class="lock-header">
                   <svg viewBox="0 0 24 24" fill="none" class="lock-icon" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4m0 4h.01"/></svg>
@@ -14,13 +14,19 @@
                 <p class="lock-desc">您正准备执行具有毁灭性的操作：</p>
                 <div class="lock-cmd"><span>{{ aiLockedCmd }}</span></div>
                 <div class="lock-actions">
-                  <input 
-                    v-model="aiLockConfirmText" 
-                    placeholder="输入 I AM SURE 放行" 
-                    @keydown.enter="confirmAiLock"
-                    class="lock-input"
-                  />
-                  <button class="lock-btn safe" @click="cancelAiLock">撤回销毁操作</button>
+                  <span class="math-captcha">{{ mathQuestion }}</span>
+                  <div style="position: relative;">
+                    <input 
+                      v-model="aiLockConfirmText" 
+                      placeholder="输入结果放行" 
+                      @keydown.enter="confirmAiLock"
+                      class="lock-input"
+                      ref="aiLockInputRef"
+                    />
+                    <div class="lock-error-toast" :class="{ 'show': showLockError }">计算错误！</div>
+                  </div>
+                  <button class="lock-btn danger" @click="confirmAiLock">确认</button>
+                  <button class="lock-btn safe" @click="cancelAiLock">取消</button>
                 </div>
               </div>
             </div>
@@ -108,6 +114,36 @@ let compTimeout: any = null;
 // ---- 高危死锁拦截 ----
 const aiLockedCmd = ref('');
 const aiLockConfirmText = ref('');
+const aiLockInputRef = ref<HTMLInputElement | null>(null);
+const showLockError = ref(false);
+let pendingAiPayload = '';
+
+const mathQuestion = ref('');
+let mathAnswer = 0;
+
+function generateMathCaptcha() {
+  const ops = ['+', '-', '*', '/'];
+  const op = ops[Math.floor(Math.random() * ops.length)];
+  let a = Math.floor(Math.random() * 9) + 1; // 1-9
+  let b = Math.floor(Math.random() * 9) + 1; // 1-9
+  
+  if (op === '+') {
+    mathAnswer = a + b;
+    mathQuestion.value = `${a} + ${b} = ?`;
+  } else if (op === '-') {
+    if (a < b) [a, b] = [b, a]; // 保证结果为正数
+    mathAnswer = a - b;
+    mathQuestion.value = `${a} - ${b} = ?`;
+  } else if (op === '*') {
+    mathAnswer = a * b;
+    mathQuestion.value = `${a} × ${b} = ?`;
+  } else if (op === '/') {
+    // a * b = c -> c / a = b，保证整除
+    const c = a * b;
+    mathAnswer = b;
+    mathQuestion.value = `${c} ÷ ${a} = ?`;
+  }
+}
 
 const DANGEROUS_PATTERNS = [
   /\brm\s+-r?[fF]?\s+\//,         // rm -rf /
@@ -122,20 +158,31 @@ function isCommandDangerous(cmd: string) {
   return DANGEROUS_PATTERNS.some(p => p.test(cmd));
 }
 
+function confirmAiLock() {
+  if (aiLockConfirmText.value.trim() === String(mathAnswer)) {
+    sendDataToBackend(pendingAiPayload); // 发送被挂起的载荷（回车或完整的外部注入片段）
+    aiLockedCmd.value = '';
+    aiLockConfirmText.value = '';
+    pendingAiPayload = '';
+    currentInputStr = ''; // reset local tracker
+    showLockError.value = false;
+  } else {
+    // 答错立刻清空，必须重填，并显示错误Toast
+    aiLockConfirmText.value = '';
+    showLockError.value = true;
+    setTimeout(() => {
+      showLockError.value = false;
+    }, 2000);
+  }
+}
+
 function cancelAiLock() {
   aiLockedCmd.value = '';
   aiLockConfirmText.value = '';
+  pendingAiPayload = '';
+  showLockError.value = false;
   sendDataToBackend('\x03'); // Send Ctrl+C to abort line in terminal!
   currentInputStr = ''; // reset local tracker
-}
-
-function confirmAiLock() {
-  if (aiLockConfirmText.value === 'I AM SURE') {
-    sendDataToBackend('\r'); // release the enter key!
-    aiLockedCmd.value = '';
-    aiLockConfirmText.value = '';
-    currentInputStr = ''; // reset local tracker
-  }
 }
 
 // Mock list of common commands for basic completion
@@ -363,17 +410,40 @@ onMounted(async () => {
 
   // 处理输入
   term.onData(async (data) => {
-    // 触发前置死锁拦截
-    if (data === '\r' || data === '\n') {
-      if (isCommandDangerous(currentInputStr) && !aiLockedCmd.value) {
-        aiLockedCmd.value = currentInputStr;
-        return; // BLOCK SENDING ENTER!
-      }
-    }
-    
     // 如果已经被锁死，屏蔽任何终端输入
     if (aiLockedCmd.value) {
       return;
+    }
+
+    // 触发前置死锁拦截前，精准捕捉终端画面中的整行文本（防 ArrowUp 历史记录和 Tab 补全绕过）
+    if (data === '\r' || data === '\n') {
+      let actualCommand = currentInputStr;
+      try {
+        const buf = term?.buffer.active;
+        if (buf) {
+          const cursorRow = buf.cursorY + buf.viewportY;
+          let lineText = '';
+          // 向上遍历直到遇到换行符，或者简单读取当前行（此处粗略读取光标所在行上方的内容）
+          for (let i = Math.max(0, cursorRow - 1); i <= cursorRow && i < buf.length; i++) {
+            const line = buf.getLine(i);
+            if (line) lineText += line.translateToString(true);
+          }
+          const afterPrompt = lineText.replace(/^.*[#$]\s*/, '').trim();
+          if (afterPrompt.length > 0) {
+            actualCommand = afterPrompt;
+          }
+        }
+      } catch (err) {}
+
+      if (isCommandDangerous(actualCommand) && !aiLockedCmd.value) {
+        aiLockedCmd.value = actualCommand;
+        pendingAiPayload = data; // 缓存真正的发送字符
+        generateMathCaptcha();
+        nextTick(() => {
+          aiLockInputRef.value?.focus();
+        });
+        return; // BLOCK SENDING ENTER!
+      }
     }
 
     // 粗略跟踪输入，如果不精确，可后续改进
@@ -742,8 +812,30 @@ onBeforeUnmount(() => {
 });
 
 defineExpose({
-  write: (data: string) => sendDataToBackend(data),
-  writeln: (data: string) => sendDataToBackend(data + '\n'),
+  write: (data: string) => {
+    // 拦截来自外部插件（如 Snippet 侧边栏）传入的带回车的毁灭指令
+    if ((data.endsWith('\n') || data.endsWith('\r')) && !aiLockedCmd.value) {
+       const cmdToCheck = data.trim();
+       if (isCommandDangerous(cmdToCheck)) {
+          aiLockedCmd.value = cmdToCheck;
+          pendingAiPayload = data; // 将整条外部命令挂起
+          generateMathCaptcha();
+          nextTick(() => aiLockInputRef.value?.focus());
+          return;
+       }
+    }
+    sendDataToBackend(data);
+  },
+  writeln: (data: string) => {
+    if (!aiLockedCmd.value && isCommandDangerous(data.trim())) {
+      aiLockedCmd.value = data.trim();
+      pendingAiPayload = data + '\n';
+      generateMathCaptcha();
+      nextTick(() => aiLockInputRef.value?.focus());
+      return;
+    }
+    sendDataToBackend(data + '\n');
+  },
   clear: () => term?.clear(),
   focus: () => term?.focus(),
   startRecording,
@@ -830,17 +922,65 @@ defineExpose({
   gap: 12px;
   margin-top: 8px;
 }
+.math-captcha {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  padding: 0 12px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  font-family: monospace;
+  font-size: 16px;
+  font-weight: bold;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  user-select: none;
+  white-space: nowrap;
+}
 .lock-input {
-  flex: 1;
+  width: 80px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(239, 68, 68, 0.3);
   color: #fff;
   padding: 0 12px;
+  height: 38px;
   border-radius: 4px;
   font-family: monospace;
   outline: none;
+  pointer-events: auto;
 }
 .lock-input:focus { border-color: #ef4444; }
+
+.lock-error-toast {
+  position: absolute;
+  top: -30px;
+  left: 50%;
+  transform: translateX(-50%) translateY(10px);
+  background: #ef4444;
+  color: #fff;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+}
+.lock-error-toast::after {
+  content: '';
+  position: absolute;
+  bottom: -4px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 4px solid #ef4444;
+}
+.lock-error-toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
 .lock-btn.safe {
   background: #3b82f6;
   color: #fff;
@@ -852,6 +992,18 @@ defineExpose({
   transition: background 0.2s;
   white-space: nowrap;
 }
+.lock-btn.danger {
+  background: #ef4444;
+  color: #fff;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+.lock-btn.danger:hover { background: #dc2626; }
 .lock-btn.safe:hover { background: #2563eb; }
 
 .terminal-search-bar {
