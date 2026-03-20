@@ -94,6 +94,8 @@ pub fn run() {
             db::record_recent,
             db::get_recents,
             db::clear_recents,
+            db::log_terminal_command,
+            db::get_recent_session_logs,
             fonts::get_system_fonts,
             ssh::get_host_stats,
             completions::get_completions,

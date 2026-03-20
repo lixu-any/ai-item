@@ -63,6 +63,8 @@
     "allow-record-recent",
     "allow-get-recents",
     "allow-clear-recents",
+    "allow-log-terminal-command",
+    "allow-get-recent-session-logs",
     "allow-get-host-stats",
     "allow-get-completions",
     "allow-sftp-connect",

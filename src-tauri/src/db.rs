@@ -42,6 +42,14 @@ pub struct Credential {
     pub description: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionLog {
+    pub id: Option<i32>,
+    pub host_id: i32,
+    pub command: String,
+    pub executed_at: Option<String>,
+}
+
 const DB_NAME: &str = "aiterm.db";
 
 fn get_conn(app_handle: &AppHandle) -> Result<Connection, String> {
@@ -64,6 +72,10 @@ pub fn init_db(app_handle: &AppHandle) -> Result<(), String> {
     }
 
     let db_path = app_dir.join(DB_NAME);
+
+    // 打印 db_path
+    println!("db_path: {:?}", db_path);
+
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
 
     conn.execute(
@@ -141,6 +153,17 @@ pub fn init_db(app_handle: &AppHandle) -> Result<(), String> {
     // 迁移：为旧数据库动态添加新列
     let _ = conn.execute("ALTER TABLE hosts ADD COLUMN tags TEXT", []);
     let _ = conn.execute("ALTER TABLE hosts ADD COLUMN notes TEXT", []);
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS session_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            host_id INTEGER NOT NULL,
+            command TEXT NOT NULL,
+            executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(host_id) REFERENCES hosts(id) ON DELETE CASCADE
+        )",
+        [],
+    ).map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -679,3 +702,63 @@ pub async fn clear_recents(app_handle: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     Ok(())
 }
+
+// ==================== 会话历史日志 (Session Logs) ====================
+
+#[tauri::command]
+pub async fn log_terminal_command(app_handle: AppHandle, host_id: i32, command: String) -> Result<(), String> {
+    let conn = get_conn(&app_handle)?;
+    // 防止极其短小的无意义空格记录
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    
+    conn.execute(
+        "INSERT INTO session_logs (host_id, command) VALUES (?1, ?2)",
+        (host_id, trimmed),
+    ).map_err(|e| e.to_string())?;
+    
+    // 清理机制：保持每台机器不超过 1000 条命令记录，防止库无限膨胀
+    conn.execute(
+        "DELETE FROM session_logs WHERE host_id = ?1 AND id NOT IN (
+            SELECT id FROM session_logs WHERE host_id = ?1 ORDER BY executed_at DESC LIMIT 1000
+        )",
+        [host_id],
+    ).map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_recent_session_logs(app_handle: AppHandle, host_id: i32, limit: Option<i32>) -> Result<Vec<SessionLog>, String> {
+    let conn = get_conn(&app_handle)?;
+    let l = limit.unwrap_or(50);
+    
+    let mut stmt = conn.prepare(
+        "SELECT id, host_id, command, executed_at FROM session_logs 
+         WHERE host_id = ?1
+         ORDER BY executed_at DESC 
+         LIMIT ?2"
+    ).map_err(|e| e.to_string())?;
+    
+    let iter = stmt.query_map([host_id, l], |row| {
+        Ok(SessionLog {
+            id: Some(row.get(0)?),
+            host_id: row.get(1)?,
+            command: row.get(2)?,
+            executed_at: row.get(3)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    
+    let mut logs: Vec<SessionLog> = Vec::new();
+    for log in iter {
+        logs.push(log.map_err(|e| e.to_string())?);
+    }
+    // 返回时需要按时间正序（最老的在上），因此我们将 DESC 拉出来的结果 reverse。
+    // 因为这是用于摘要和推演，顺序符合人类直觉。
+    logs.reverse();
+    
+    Ok(logs)
+}
+

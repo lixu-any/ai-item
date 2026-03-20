@@ -33,6 +33,7 @@ const termCursorStyle = ref<'block' | 'underline' | 'bar'>('block');
 const tabTitleMode = ref<'ip' | 'name'>('ip');
 const termAutoCompletion = ref(true);
 const termRenderer = ref<'dom' | 'webgl'>('webgl');
+const termEnableNanoHud = ref(true);
 
 // ---- 系统字体 ----
 const systemFonts = ref<string[]>([]);
@@ -106,6 +107,9 @@ async function loadSettings() {
     const rendererStr = await invoke<string | null>('get_setting', { key: 'term_renderer' });
     termRenderer.value = (rendererStr as any) || 'webgl';
 
+    const enableNanoHudStr = await invoke<string | null>('get_setting', { key: 'term_enable_nano_hud' });
+    termEnableNanoHud.value = enableNanoHudStr !== 'false';
+
     const timeout = await invoke<string | null>('get_setting', { key: 'ssh_connect_timeout' });
     sshTimeout.value = timeout ? parseInt(timeout) : 15;
 
@@ -129,6 +133,7 @@ async function saveSettings() {
     await invoke('save_setting', { key: 'tab_title_mode', value: tabTitleMode.value });
     await invoke('save_setting', { key: 'term_auto_completion', value: String(termAutoCompletion.value) });
     await invoke('save_setting', { key: 'term_renderer', value: termRenderer.value });
+    await invoke('save_setting', { key: 'term_enable_nano_hud', value: String(termEnableNanoHud.value) });
     await invoke('save_setting', { key: 'ssh_connect_timeout', value: String(sshTimeout.value) });
     await invoke('save_setting', { key: 'ssh_keepalive', value: String(sshKeepalive.value) });
 
@@ -140,6 +145,7 @@ async function saveSettings() {
       cursorStyle: termCursorStyle.value,
       autoCompletion: termAutoCompletion.value,
       renderer: termRenderer.value,
+      enableNanoHud: termEnableNanoHud.value,
     });
 
     emit('toast', { message: '设置已保存', type: 'success' });
@@ -426,20 +432,15 @@ onMounted(() => {
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="2" y="3" width="20" height="5" rx="1"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="17" x2="22" y2="17"/></svg>
               标签页标题
             </div>
-            <div class="form-field">
-              <label>连接时标签显示</label>
-              <div class="toggle-opts">
-                <button class="toggle-opt" :class="{ active: tabTitleMode === 'name' }" @click="tabTitleMode = 'name'">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M20 7H4a2 2 0 00-2 2v6a2 2 0 002 2h16a2 2 0 002-2V9a2 2 0 00-2-2z"/><line x1="12" y1="12" x2="12" y2="12"/></svg>
-                  服务器名称
-                  <span class="opt-example">pre腾讯</span>
-                </button>
-                <button class="toggle-opt" :class="{ active: tabTitleMode === 'ip' }" @click="tabTitleMode = 'ip'">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20"/></svg>
-                  IP 地址
-                  <span class="opt-example">root@152.x.x.x</span>
-                </button>
+            <div class="form-field" style="display:flex; flex-direction:row; justify-content:flex-start; align-items:center; gap:32px;">
+              <div class="setting-info">
+                <label>连接时标签显示</label>
+                <div class="setting-desc" style="color: #6b7280; font-size: 13px; margin-top: 4px;">指定选项卡上显示的主机标识</div>
               </div>
+              <select v-model="tabTitleMode" class="compact-select">
+                <option value="name">服务器名称 (如 pre腾讯)</option>
+                <option value="ip">IP 地址 (如 root@152.x.x.x)</option>
+              </select>
             </div>
           </div>
 
@@ -449,43 +450,45 @@ onMounted(() => {
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
               渲染引擎
             </div>
-            <div class="form-field">
-              <label>终端底层渲染技术</label>
-              <div class="toggle-opts">
-                <button class="toggle-opt" :class="{ active: termRenderer === 'webgl' }" @click="termRenderer = 'webgl'">
-                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-                  WebGL 加速
-                  <span class="opt-example">性能强劲，适合海量日志</span>
-                </button>
-                <button class="toggle-opt" :class="{ active: termRenderer === 'dom' }" @click="termRenderer = 'dom'">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
-                  DOM 渲染
-                  <span class="opt-example">兼容绝佳，预防花屏显示</span>
-                </button>
+            <div class="form-field" style="display:flex; flex-direction:row; justify-content:flex-start; align-items:center; gap:32px;">
+              <div class="setting-info">
+                <label>终端底层渲染技术</label>
+                <div class="setting-desc" style="color: #6b7280; font-size: 13px; margin-top: 4px;">WebGL 性能强劲，DOM 渲染预防花屏</div>
               </div>
+              <select v-model="termRenderer" class="compact-select">
+                <option value="webgl">WebGL 加速</option>
+                <option value="dom">DOM 渲染</option>
+              </select>
             </div>
           </div>
 
-          <!-- 智能提示 -->
+          <!-- 附加功能 -->
           <div class="section">
             <div class="section-label">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-              智能提示
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 2A10 10 0 1 0 22 12A10 10 0 0 0 12 2Z" /><path d="M12 6V12L16 14" /></svg>
+              扩展偏好
             </div>
-            <div class="form-field">
-              <label>终端自动补全</label>
-              <div class="toggle-opts">
-                <button class="toggle-opt" :class="{ active: termAutoCompletion }" @click="termAutoCompletion = true">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-                  开启
-                  <span class="opt-example">提供命令补全建议</span>
-                </button>
-                <button class="toggle-opt" :class="{ active: !termAutoCompletion }" @click="termAutoCompletion = false">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                  关闭
-                  <span class="opt-example">禁用补全浮层</span>
-                </button>
+            
+            <div class="form-field" style="display:flex; flex-direction:row; justify-content:flex-start; align-items:center; gap:32px; padding: 4px 0;">
+              <div class="setting-info" style="min-width: 200px;">
+                <label>终端自动补全</label>
+                <div class="setting-desc" style="color: #6b7280; font-size: 13px; margin-top: 4px;">输入时自动展示历史命令悬浮窗</div>
               </div>
+              <label class="switch">
+                <input type="checkbox" v-model="termAutoCompletion" />
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="form-field" style="display:flex; flex-direction:row; justify-content:flex-start; align-items:center; gap:32px; padding: 4px 0;">
+              <div class="setting-info" style="min-width: 200px;">
+                <label>探测之眼 (Nano HUD)</label>
+                <div class="setting-desc" style="color: #6b7280; font-size: 13px; margin-top: 4px;">在终端右上角显示迷你波形图</div>
+              </div>
+              <label class="switch">
+                <input type="checkbox" v-model="termEnableNanoHud" />
+                <span class="slider"></span>
+              </label>
             </div>
           </div>
         </div>
@@ -779,38 +782,77 @@ onMounted(() => {
 .cursor-opt:hover { border-color: #3b82f6; color: #e2e8f0; }
 .cursor-opt.active { border-color: #3b82f6; background: #1e3a5f; color: #fff; font-weight: 600; }
 
-/* ===== 标签标题模式切换 ===== */
-.toggle-opts { display: flex; gap: 10px; }
-.toggle-opt {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 12px 10px;
-  border-radius: 10px;
+/* ===== 紧凑型下拉菜单 ===== */
+.compact-select {
+  padding: 6px 32px 6px 12px;
+  border-radius: 8px;
   border: 1.5px solid #e2e8f0;
-  background: #fff;
-  color: #475569;
-  font-size: 12.5px;
-  cursor: pointer;
-  transition: all 0.15s;
+  background-color: #f8fafc;
+  color: #334155;
+  font-size: 13px;
   font-family: inherit;
-  appearance: none; -webkit-appearance: none;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 14px;
+  transition: all 0.2s;
 }
-.toggle-opt svg { width: 18px; height: 18px; }
-.toggle-opt:hover { border-color: #93c5fd; color: #1e40af; background: #f8faff; }
-.toggle-opt.active { border-color: #3b82f6; background: #eff6ff; color: #2563eb; font-weight: 600; }
-.opt-example {
-  font-size: 11px;
-  color: #94a3b8;
-  font-family: monospace;
-  background: #f1f5f9;
-  padding: 2px 6px;
-  border-radius: 4px;
-  margin-top: 2px;
+.compact-select:hover {
+  border-color: #cbd5e1;
+  background-color: #fff;
 }
-.toggle-opt.active .opt-example { background: #dbeafe; color: #2563eb; }
+.compact-select:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+/* ===== iOS 风格开关 ===== */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  flex-shrink: 0;
+}
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #cbd5e1;
+  transition: .3s;
+  border-radius: 24px;
+}
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: white;
+  transition: .3s;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+input:checked + .slider {
+  background-color: #3b82f6;
+}
+input:checked + .slider:before {
+  transform: translateX(20px);
+}
+input:focus + .slider {
+  outline: 2px solid rgba(59, 130, 246, 0.3);
+  outline-offset: 2px;
+}
 
 /* ===== 数据管理 ===== */
 .check-list { display: flex; flex-direction: column; gap: 8px; }

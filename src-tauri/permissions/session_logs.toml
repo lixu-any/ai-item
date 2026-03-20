@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-log-terminal-command"
+description = "Enables the log_terminal_command command."
+commands.allow = ["log_terminal_command"]
+
+[[permission]]
+identifier = "allow-get-recent-session-logs"
+description = "Enables the get_recent_session_logs command."
+commands.allow = ["get_recent_session_logs"]

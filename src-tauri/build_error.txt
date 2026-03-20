@@ -1,2 +1,0 @@
-    Checking tauri-app v0.1.0 (/Users/lixu/code/ai/lidayeiTerm/src-tauri)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.58s

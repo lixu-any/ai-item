@@ -61,10 +61,13 @@ pub async fn ask_ai(
         return Err(format!("API Error: {}", error_text));
     }
 
-    let response_json: Value = res
-        .json()
+    let text = res
+        .text()
         .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
+        .map_err(|e| format!("Failed to read response text: {}", e))?;
+
+    let response_json: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("Failed to parse response JSON: {}\nRaw response: {}", e, text))?;
 
     let content = response_json["choices"][0]["message"]["content"]
         .as_str()

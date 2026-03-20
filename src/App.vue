@@ -89,7 +89,6 @@ async function clearRecents() {
   try {
     await invoke('clear_recents');
     recentHosts.value = [];
-    showToast('已清空最近连接');
   } catch (err) {
     showToast('清空最近连接失败: ' + err, 'error');
   }
@@ -119,7 +118,13 @@ function handleAiDiagnose(errorText: string) {
 // ---- 广播模式 ----
 const broadcastMode = ref(false);
 const broadcastInput = ref('');
-const broadcastSelected = ref<Set<string>>(new Set()); // 空=全部
+const broadcastSelected = ref<string[]>([]); // 数组保证 Vue 响应式
+function isSessionSelected(id: string) { return broadcastSelected.value.includes(id); }
+function toggleBroadcastSession(id: string) {
+  const idx = broadcastSelected.value.indexOf(id);
+  if (idx >= 0) broadcastSelected.value.splice(idx, 1);
+  else broadcastSelected.value.push(id);
+}
 
 function toggleBroadcast() {
   broadcastMode.value = !broadcastMode.value;
@@ -130,8 +135,8 @@ async function sendBroadcast() {
   const cmd = broadcastInput.value;
   if (!cmd) return;
   const data = new TextEncoder().encode(cmd + '\r');
-  const targets = broadcastSelected.value.size > 0
-    ? sessions.value.filter(s => broadcastSelected.value.has(s.id))
+  const targets = broadcastSelected.value.length > 0
+    ? sessions.value.filter(s => isSessionSelected(s.id))
     : sessions.value;
   for (const s of targets) {
     try {
@@ -179,7 +184,6 @@ async function openMonitor(session: any) {
 function handleRunSnippet(command: string) {
   if (activeSessionId.value && terminalRefs.value[activeSessionId.value] && sessions.value.find(s => s.id === activeSessionId.value)?.type !== 'player') {
     terminalRefs.value[activeSessionId.value].write(command + '\n');
-    showToast('已发送命令片段');
   } else {
     showToast('没有活动的终端窗口可以接收命令', 'error');
   }
@@ -221,7 +225,6 @@ function handleSelectCredential(c: any) {
     pkType.value = c.private_key.includes('BEGIN') ? 'content' : 'path';
   }
   showCredentialManager.value = false;
-  showToast(`已应用凭据: ${c.name}`);
 }
 
 const viewMode = ref<'main' | 'add-host' | 'edit-host' | 'add-group' | 'edit-group' | 'settings' | 'credentials'>('main');
@@ -310,7 +313,6 @@ async function handleZmodemDetect(session: any, payload?: any) {
   try {
     const selected = await open({ multiple: true, title: 'rz - 选择要上传的文件' });
     if (!selected) {
-      showToast('已取消上传');
       return;
     }
     const paths = Array.isArray(selected) ? selected : [selected];
@@ -322,14 +324,12 @@ async function handleZmodemDetect(session: any, payload?: any) {
       if (typeof localPath !== 'string') continue;
       const filename = localPath.split(/[/\\]/).pop() || 'uploaded_file';
       const remotePath = `${remoteCwd}/${filename}`;
-      showToast(`正在上传 ${filename} 到 ${remoteCwd}...`);
       try {
         await invoke('sftp_upload_file', {
           sessionId: session.id,
           localPath,
           remotePath,
         });
-        showToast(`${filename} 上传完成!`);
       } catch (err: any) {
         showToast(`${filename} 上传失败: ${err}`, 'error');
       }
@@ -377,17 +377,14 @@ async function handleZmodemSz(session: any, payload: { sessionId: string; filena
       remotePath = `${remoteCwd}/${filename}`;
     }
 
-    showToast(`正在下载 ${remotePath}...`);
     try {
       await invoke('sftp_download_file', {
         sessionId: session.id,
         remotePath,
         localPath: savePath,
       });
-      showToast(`${filename} 下载完成!`);
     } catch (firstErr: any) {
       // First attempt failed, try to locate the file
-      showToast(`路径 ${remotePath} 失败，正在搜索文件...`);
       try {
         const found = await invoke('sftp_exec', {
           sessionId: session.id,
@@ -395,7 +392,6 @@ async function handleZmodemSz(session: any, payload: { sessionId: string; filena
         }) as string;
         if (found && found.length > 0) {
           remotePath = found;
-          showToast(`找到文件: ${remotePath}`);
           await invoke('sftp_download_file', {
             sessionId: session.id,
             remotePath,
@@ -547,7 +543,6 @@ async function saveHost() {
       await win.close();
     } else {
       // 兼容旧模式或内建模式（如果有的话）
-      showToast("保存成功");
       showAddModal.value = false;
       isEditing.value = false;
       newHost.value = { name: '', host: '', port: 22, username: 'root', password: '', private_key: '', group_id: null };
@@ -718,7 +713,6 @@ async function saveGroup() {
       const win = getCurrentWebviewWindow();
       await win.close();
     } else {
-      showToast("分组保存成功");
       showGroupModal.value = false;
       newGroup.value = { name: '', parent_id: null };
       await loadGroups();
@@ -873,7 +867,6 @@ async function connectToHost(host: Host) {
       connectTimeoutSecs,
       keepaliveSecs,
     });
-    showToast(`成功连接到 ${host.name}`);
     // 记录最近连接
     if (host.id) invoke('record_recent', { hostId: host.id }).catch(() => {});
     loadRecents();
@@ -907,8 +900,8 @@ async function disconnectSession(session: SessionTab) {
     } else {
       await invoke('close_pty_session', { sessionId: session.id });
     }
-    session.connected = false;
-    showToast(`已断开会话: ${session.title}`);
+    // 断开后直接关闭标签页，避免灰色残留标签厚积
+    closeSession(session.id);
   } catch (err) {
     console.error("断开会话失败:", err);
   }
@@ -923,15 +916,14 @@ function onTabContextMenu(e: MouseEvent, session: SessionTab) {
   const isConnected = session.connected !== false;
   
   tabMenuItems.value = [
-    { label: '复制标签', icon: '👯', action: 'duplicate' },
+    { label: '复制标签', action: 'duplicate' },
     { divider: true },
-    { label: '连接', icon: '🔗', action: 'connect', disabled: isConnected },
-    { label: '重新连接', icon: '🔄', action: 'reconnect' },
-    { label: '断开连接', icon: '🔌', action: 'disconnect', disabled: !isConnected },
+    { label: '重新连接', action: 'reconnect' },
+    { label: '断开连接', action: 'disconnect', disabled: !isConnected },
     { divider: true },
-    { label: '关闭', icon: '❌', action: 'close' },
-    { label: '关闭其他', icon: '🧹', action: 'closeOthers' },
-    { label: '关闭全部', icon: '🗑️', action: 'closeAll', danger: true },
+    { label: '关闭', action: 'close' },
+    { label: '关闭其他', action: 'closeOthers' },
+    { label: '关闭全部', action: 'closeAll', danger: true },
   ];
   
   showTabMenu.value = true;
@@ -990,9 +982,8 @@ async function onDrop(hostId: number, groupId: number | null) {
       const updatedHost = { ...host, group_id: groupId };
       await invoke("update_host", { host: updatedHost });
       await loadHosts();
-      console.log(`主机 ${hostId} 已移动到分组 ${groupId}`);
     } catch (err) {
-      alert("移动失败: " + err);
+      showToast("移动失败: " + err, 'error');
     }
   }
 }
@@ -1063,19 +1054,24 @@ async function saveWindowSize() {
             :class="{
               active: activeSessionId === session.id,
               disconnected: session.connected === false,
-              'bc-selected': broadcastMode && broadcastSelected.has(session.id)
+              'bc-selected': broadcastMode && isSessionSelected(session.id)
             }"
             @click="activeSessionId = session.id"
             @contextmenu.prevent="onTabContextMenu($event, session)"
           >
             <!-- 广播模式勾选 -->
-            <span
+            <label
               v-if="broadcastMode"
               class="bc-check"
-              @click.stop="broadcastSelected.has(session.id)
-                ? broadcastSelected.delete(session.id)
-                : broadcastSelected.add(session.id)"
-            >{{ broadcastSelected.has(session.id) ? '✅' : '□' }}</span>
+              @click.stop
+            >
+              <input
+                type="checkbox"
+                :checked="isSessionSelected(session.id)"
+                @change="toggleBroadcastSession(session.id)"
+                class="bc-checkbox"
+              />
+            </label>
             <span class="tab-title-text">{{ session.title }}</span>
             <div class="tab-actions">
               <span
@@ -1089,16 +1085,16 @@ async function saveWindowSize() {
             </div>
           </div>
         </div>
-        <div class="top-bar-actions" v-if="activeSessionId && sessions.find(s => s.id === activeSessionId)?.type === 'ssh'" style="margin-left:auto; display:flex; align-items:center; padding-right:16px; flex-shrink:0;">
-          <div class="view-toggle" style="display:flex; background:rgba(128,128,128,0.1); border-radius:6px; padding:3px; gap:2px;">
-            <button 
-              style="border:none; padding:4px 14px; border-radius:4px; font-size:12px; font-weight:500; cursor:pointer; transition:all 0.2s;"
-              :style="getSessionViewMode(activeSessionId) === 'terminal' ? 'background:var(--bg-main, #fff);color:var(--text-main, #333);box-shadow:0 1px 3px rgba(0,0,0,0.1);' : 'background:transparent;color:var(--text-muted, #777);'"
+        <div class="top-bar-actions" v-if="activeSessionId && sessions.find(s => s.id === activeSessionId)?.type === 'ssh'">
+          <div class="view-toggle">
+            <button
+              class="view-toggle-btn"
+              :class="{ active: getSessionViewMode(activeSessionId) === 'terminal' }"
               @click="setSessionViewMode(activeSessionId, 'terminal')"
             >终端</button>
-            <button 
-              style="border:none; padding:4px 14px; border-radius:4px; font-size:12px; font-weight:500; cursor:pointer; transition:all 0.2s;"
-              :style="getSessionViewMode(activeSessionId) === 'sftp' ? 'background:var(--bg-main, #fff);color:var(--text-main, #333);box-shadow:0 1px 3px rgba(0,0,0,0.1);' : 'background:transparent;color:var(--text-muted, #777);'"
+            <button
+              class="view-toggle-btn"
+              :class="{ active: getSessionViewMode(activeSessionId) === 'sftp' }"
               @click="setSessionViewMode(activeSessionId, 'sftp')"
             >文件</button>
           </div>
@@ -1172,11 +1168,13 @@ async function saveWindowSize() {
                 v-show="getSessionViewMode(session.id) === 'terminal'"
                 :ref="(el: any) => setTerminalRef(session.id, el)"
                 :session-id="session.id" 
+                :session-obj="session"
                 :is-active="activeSessionId === session.id && getSessionViewMode(session.id) === 'terminal'"
                 :type="(session.type as 'ssh' | 'local')"
                 @zmodem-detect="handleZmodemDetect(session, $event)"
                 @zmodem-sz="handleZmodemSz(session, $event)"
                 @ai-diagnose="handleAiDiagnose"
+                @toast="(t: any) => showToast(t.message, t.type)"
               />
               <SftpBrowser
                 v-if="session.type === 'ssh'"
@@ -2266,4 +2264,50 @@ button {
   }
 }
 
+/* ---- 终端/文件视图切换 ---- */
+.top-bar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  padding-right: 16px;
+  flex-shrink: 0;
+}
+.view-toggle {
+  display: flex;
+  background: rgba(128, 128, 128, 0.1);
+  border-radius: 6px;
+  padding: 3px;
+  gap: 2px;
+}
+.view-toggle-btn {
+  border: none;
+  padding: 4px 14px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: transparent;
+  color: var(--text-muted, #777);
+}
+.view-toggle-btn.active {
+  background: var(--bg-main, #fff);
+  color: var(--text-main, #333);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+/* ---- 广播模式 checkbox ---- */
+.bc-checkbox {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: var(--accent-color, #3b82f6);
+  margin: 0;
+}
+.bc-check {
+  display: flex;
+  align-items: center;
+  padding: 0 2px;
+  cursor: pointer;
+}
 </style>
