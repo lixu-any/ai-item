@@ -35,13 +35,20 @@ const emit = defineEmits<{
 
 const localHost = ref<Host>({ ...props.modelValue });
 
+// flush:'sync' 确保 watcher 同步执行，syncingFromProp 标志在回调时仍有效
+// 否则 Vue 的异步 watcher 队列会让标志归零后回调才执行，造成 build 版本死循环
+let syncingFromProp = false;
+
 watch(() => props.modelValue, (val) => {
+  syncingFromProp = true;
   localHost.value = { ...val };
-}, { deep: true });
+  syncingFromProp = false;
+}, { deep: true, flush: 'sync' });
 
 watch(localHost, (val) => {
-  emit('update:modelValue', val);
-}, { deep: true });
+  if (syncingFromProp) return;
+  emit('update:modelValue', { ...val });
+}, { deep: true, flush: 'sync' });
 
 function getAuthType() { return props.authTypeRef; }
 function setAuthType(v: 'password' | 'private_key') { emit('update:authTypeRef', v); }

@@ -9,7 +9,8 @@
     </transition>
 
     <div class="terminal-padding-wrapper" @click="focusTerminal">
-          <div style="position:relative; width:100%; height:100%;">
+          <!-- 在 flex 容器中，必须加 flex:1 和 min-width:0，否则内部内容会撑开导致 width 计算错误 -->
+          <div style="position:relative; flex:1; min-width:0; height:100%;">
             <div ref="terminalContainer" class="terminal-container" @wheel="handleWheel"></div>
 
             <div v-if="ghostRemainder" class="ghost-text" :style="ghostTextStyle">{{ ghostRemainder }}</div>
@@ -39,8 +40,9 @@
                 </div>
               </div>
             </div>
+            <!-- NanoHUD 移入此 position:relative 容器，absolute 相对于内层 div 定位，不影响 flex 宽度分配 -->
+            <NanoHUD v-if="props.type === 'ssh' && termEnableNanoHud" :session="props.sessionObj" :is-active="!!props.isActive" />
           </div>
-          <NanoHUD v-if="props.type === 'ssh' && termEnableNanoHud" :session="props.sessionObj" :is-active="!!props.isActive" />
     </div>
 
 
@@ -451,6 +453,13 @@ onMounted(async () => {
 
   term.open(terminalContainer.value);
   
+  // 在浏览器真正完成 layout/paint 后触发初次 fit（双帧 rAF 是 xterm.js 推荐的模式）
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      try { fitAddon!.fit(); } catch(e) {}
+    });
+  });
+
   // 仅在明确选择 WebGL 或默认时加载
   if (savedRenderer === 'webgl' || !savedRenderer) {
     try {
@@ -468,17 +477,14 @@ onMounted(async () => {
   }
   
   resizeObserver = new ResizeObserver(() => {
-    if (props.isActive && fitAddon) {
-      if (resizeTimer) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        try {
-          fitAddon!.fit();
-          console.log('Terminal: Refitted to handle wrapping -', term?.cols, 'cols');
-        } catch (e) {}
-      }, 50);
-    }
+    // 隐藏状态下（width为0）绝对不能调用 fit()，否则会破坏 xterm 内部尺寸计算
+    if (!props.isActive || !fitAddon) return;
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      try { fitAddon!.fit(); } catch (e) {}
+    }, 20);
   });
-  resizeObserver.observe(terminalContainer.value!.parentElement!); // 观察包含内边距的容器
+  resizeObserver.observe(terminalContainer.value!); // 直接观察 xterm 容器本身
 
   // 拦截特定的前端按键，处理自动补全下拉框逻辑
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
@@ -927,10 +933,13 @@ function onSearch(isNext = false) {
 
 watch(() => props.isActive, (active) => {
   if (active && term && fitAddon) {
-    setTimeout(() => {
-      try { fitAddon!.fit(); } catch(e){}
-      term!.focus();
-    }, 50);
+    // 切换标签页时用 rAF 确保容器可见后再 fit
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        try { fitAddon!.fit(); } catch(e){}
+        term!.focus();
+      });
+    });
   }
 });
 
@@ -965,6 +974,12 @@ onBeforeUnmount(() => {
 });
 
 defineExpose({
+  getDimensions: () => {
+    return { cols: term?.cols || 80, rows: term?.rows || 24 };
+  },
+  fit: () => {
+    try { fitAddon?.fit(); } catch(e){}
+  },
   write: (data: string) => {
     // 拦截来自外部插件（如 Snippet 侧边栏）传入的带回车的毁灭指令
     if ((data.endsWith('\n') || data.endsWith('\r')) && !aiLockedCmd.value) {

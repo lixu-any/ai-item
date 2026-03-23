@@ -164,7 +164,6 @@ pub async fn open_ssh_session(
                 Ok(n) => {
                     active = true;
                     let data = &buffer[..n];
-                    println!("Worker: 从 SSH 读取到了 {} bytes，准备通过事件发送", n);
                     if let Err(e) = app_handle_clone.emit(
                         &format!("sse-data-{}", session_id_clone),
                         data.to_vec(),
@@ -253,12 +252,10 @@ pub async fn write_to_ssh(
     session_id: String,
     data: Vec<u8>,
 ) -> Result<(), String> {
-    println!("收到前端输入请求，SessionID: {}, 数据长度: {}", session_id, data.len());
     let pool = state.0.lock().unwrap();
     if let Some(sess) = pool.get(&session_id) {
         match sess.tx.send(SshControlMsg::Data(data)) {
             Ok(_) => {
-                println!("成功将数据送入 channel");
                 Ok(())
             }
             Err(e) => {

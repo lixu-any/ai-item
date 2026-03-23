@@ -23,13 +23,18 @@ const emit = defineEmits<{
 
 const localGroup = ref<Group>({ ...props.modelValue });
 
+let syncingFromProp = false;
+
 watch(() => props.modelValue, (val) => {
+  syncingFromProp = true;
   localGroup.value = { ...val };
-}, { deep: true });
+  syncingFromProp = false;
+}, { deep: true, flush: 'sync' });
 
 watch(localGroup, (val) => {
-  emit('update:modelValue', val);
-}, { deep: true });
+  if (syncingFromProp) return;
+  emit('update:modelValue', { ...val });
+}, { deep: true, flush: 'sync' });
 
 </script>
 

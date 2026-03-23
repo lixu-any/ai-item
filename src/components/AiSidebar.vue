@@ -410,7 +410,8 @@ function parseContent(text: string): Segment[] {
   font-size: 12px;
   line-height: 1.6;
   overflow-x: auto;
-  white-space: pre;
+  white-space: pre-wrap;   /* 自动换行 */
+  word-break: break-all;   /* 长命令强制断行 */
 }
 .code-body code { font-family: inherit; }
 

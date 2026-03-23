@@ -174,7 +174,7 @@ function generateFillPath(history: number[]) {
   border-radius: 8px;
   padding: 8px 10px;
   pointer-events: none; /* Let clicks pass through to terminal */
-  z-index: 100;
+  z-index: 10; /* 低于 AI 侧边栏(z-index:50)，侧边栏打开时自然覆盖 HUD */
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
   transition: opacity 0.3s ease;
 }

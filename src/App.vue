@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, nextTick, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { listen, emit } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -92,6 +93,11 @@ async function clearRecents() {
   } catch (err) {
     showToast('清空最近连接失败: ' + err, 'error');
   }
+}
+
+const appVersion = ref('');
+async function loadVersion() {
+  try { appVersion.value = await getVersion(); } catch { appVersion.value = '1.0.1'; }
 }
 
 const toasts = ref<{id: number, message: string, type: 'success' | 'error'}[]>([]);
@@ -447,6 +453,7 @@ onMounted(async () => {
   const params = new URLSearchParams(window.location.search);
   const view = params.get('view');
   
+  loadVersion();
   // 无论什么模式，都需要加载业务分组以便选择
   loadGroups();
   loadRecents();
@@ -813,12 +820,18 @@ async function newLocalTerminal() {
   sessions.value.push(newSession);
   activeSessionId.value = sessionId;
   
+  await nextTick();
+  await new Promise(r => setTimeout(r, 100)); // 等待 Terminal 挂载并且首帧 fit 测算完毕
+  
   try {
-    // 默认开启尺寸，稍后 Terminal.vue 会触发 resize 同步更准确的值
+    const terminalNode = terminalRefs.value[sessionId];
+    const dims = terminalNode?.getDimensions?.() || { cols: 80, rows: 24 };
+
+    // 直接使用前端确定的尺寸，避免 Backend 先分配 80x24 后期再 resize 发送失败或错开
     await invoke('open_pty_session', {
-      sessionId: sessionId, // PTY session is tied to sessionId
-      cols: 80,
-      rows: 24
+      sessionId: sessionId,
+      cols: dims.cols,
+      rows: dims.rows
     });
   } catch (err) {
     showToast(`无法开启本地终端: ${err}`, 'error');
@@ -845,15 +858,17 @@ async function connectToHost(host: Host) {
   activeSessionId.value = sessionId;
 
   await nextTick();
-  await new Promise(r => setTimeout(r, 100));
+  await new Promise(r => setTimeout(r, 100)); // 等待 Terminal 挂载并且首帧 fit 测算完毕
 
   try {
     console.log("正在调用 open_ssh_session...");
-    // 读取用户设置中的超时和 keepalive 配置
     const timeoutStr = await invoke<string | null>('get_setting', { key: 'ssh_connect_timeout' });
     const keepaliveStr = await invoke<string | null>('get_setting', { key: 'ssh_keepalive' });
     const connectTimeoutSecs = timeoutStr ? parseInt(timeoutStr) : 15;
     const keepaliveSecs = keepaliveStr ? parseInt(keepaliveStr) : 60;
+
+    const terminalNode = terminalRefs.value[sessionId];
+    const dims = terminalNode?.getDimensions?.() || { cols: 80, rows: 24 };
 
     await invoke("open_ssh_session", {
       sessionId: sessionId,
@@ -862,8 +877,8 @@ async function connectToHost(host: Host) {
       username: host.username,
       password: host.password || null,
       privateKey: host.private_key || null,
-      cols: 80,
-      rows: 24,
+      cols: dims.cols,
+      rows: dims.rows,
       connectTimeoutSecs,
       keepaliveSecs,
     });
@@ -1126,7 +1141,7 @@ async function saveWindowSize() {
       <div v-if="broadcastMode" class="broadcast-bar">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="14" height="14"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/></svg>
         <span class="bc-label">
-          广播{{ broadcastSelected.size > 0 ? ` (已选 ${broadcastSelected.size} 个)` : ` (全部 ${sessions.length} 个)` }}
+          广播{{ broadcastSelected.length > 0 ? ` (已选 ${broadcastSelected.length} 个)` : ` (全部 ${sessions.length} 个)` }}
         </span>
         <input
           v-model="broadcastInput"
@@ -1145,7 +1160,7 @@ async function saveWindowSize() {
         </div>
         <div v-if="sessions.length === 0 && !connecting" class="terminal-empty">
           <div class="empty-hero">
-            <div class="hero-badge">v1.0.0</div>
+            <div class="hero-badge">v{{ appVersion }}</div>
             <h1>Nixu</h1>
             <p class="hero-slogan">Your servers, your AI, your terminal.</p>
             <p class="hero-desc">基于人工智能的高效 SSH 终端 · 多会话管理 · AI 内建助手</p>
