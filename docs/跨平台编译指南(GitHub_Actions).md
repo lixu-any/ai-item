@@ -24,6 +24,9 @@ on:
     tags:
       - 'v*' # 只有当你推送形如 v1.0.2 的 tag 时才会触发
 
+permissions:
+  contents: write # 必须显式声明写入权限，否则 Action 无法自动创建 Release
+
 jobs:
   build-tauri:
     strategy:
