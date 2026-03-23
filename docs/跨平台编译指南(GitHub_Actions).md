@@ -97,7 +97,7 @@ git commit -m "chore: 增加跨平台构建 GitHub Actions 配置"
 git push origin HEAD
 ```
 
-*如果你还没有在 GitHub 上建立私有仓库，请先在网页端建立，并将本地代码绑定且推给它。*
+*如果你还没有在 GitHub 上建立私有仓库，请先在网页端建立，并将本地代码绑定且推给它。*1
 
 ## 步骤 4：触发自动打包
 
