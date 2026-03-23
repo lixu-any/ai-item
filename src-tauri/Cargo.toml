@@ -28,7 +28,7 @@ tokio = { version = "1", features = ["full"] }
 portable-pty = "0.8.1"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 keyring = "3"
-ssh2 = "0.9"
+ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 uuid = { version = "1.22.0", features = ["v4"] }
 reqwest = { version = "0.12", features = ["json"] }
 chrono = { version = "0.4", features = ["serde"] }
