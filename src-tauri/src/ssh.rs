@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
+use base64::{Engine as _, engine::general_purpose};
 
 pub enum SshControlMsg {
     Data(Vec<u8>),
@@ -13,7 +14,7 @@ pub enum SshControlMsg {
 }
 
 pub struct SshSession {
-    pub tx: mpsc::Sender<SshControlMsg>,
+    pub tx: mpsc::SyncSender<SshControlMsg>,
 }
 
 #[derive(Default)]
@@ -144,7 +145,7 @@ pub async fn open_ssh_session(
         }
     }
 
-    let (tx, rx) = mpsc::channel::<SshControlMsg>();
+    let (tx, rx) = mpsc::sync_channel::<SshControlMsg>(2048);
     
     let session_id_clone = session_id.clone();
     let app_handle_clone = app_handle.clone();
@@ -152,52 +153,83 @@ pub async fn open_ssh_session(
     thread::spawn(move || {
         println!("Worker: 开始为 Session {} 启动循环...", session_id_clone);
         let mut buffer = [0u8; 8192];
-        loop {
-            let mut active = false;
+        let mut idle_count = 0;
+        'worker: loop {
+            let mut read_active = false;
+            let mut write_active = false;
 
-            // Read from SSH
+            // 1. Read from SSH
             match channel.read(&mut buffer) {
                 Ok(0) => {
                     println!("Worker: SSH channel read 遇到 EOF (Ok(0))");
-                    break;
+                    break 'worker;
                 }
                 Ok(n) => {
-                    active = true;
+                    read_active = true;
+                    idle_count = 0;
                     let data = &buffer[..n];
+                    let b64_data = general_purpose::STANDARD.encode(data);
                     if let Err(e) = app_handle_clone.emit(
                         &format!("sse-data-{}", session_id_clone),
-                        data.to_vec(),
+                        b64_data,
                     ) {
                         println!("Worker: emit 发送事件失败: {}", e);
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // Normal in non-blocking
-                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => {
                     println!("Worker: SSH channel 发生致命读取错误: {:?}", e);
-                    break;
+                    break 'worker;
                 }
             }
 
-            // Process Control Messages (Write to SSH or Resize)
-            while let Ok(msg) = rx.try_recv() {
-                active = true;
+            // 2. Process Control Messages
+            // Get the first message. If we just read from SSH, grab exactly what's pending (try_recv).
+            // If idle, wait using recv_timeout.
+            let first_msg_result = if read_active {
+                rx.try_recv().map_err(|e| match e {
+                    std::sync::mpsc::TryRecvError::Empty => std::sync::mpsc::RecvTimeoutError::Timeout,
+                    std::sync::mpsc::TryRecvError::Disconnected => std::sync::mpsc::RecvTimeoutError::Disconnected,
+                })
+            } else {
+                let timeout = if idle_count < 100 { 2 } else { 15 };
+                rx.recv_timeout(Duration::from_millis(timeout))
+            };
+
+            let mut process_queue = Vec::new();
+            match first_msg_result {
+                Ok(msg) => {
+                    process_queue.push(msg);
+                    // Drain any remaining messages that queued up
+                    while let Ok(m) = rx.try_recv() {
+                        process_queue.push(m);
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Normal idle empty queue
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    println!("Worker: Channel is disconnected. Worker thread exiting.");
+                    break 'worker;
+                }
+            }
+
+            // 3. Handle messages
+            for msg in process_queue {
+                write_active = true;
+                idle_count = 0;
                 match msg {
                     SshControlMsg::Data(data) => {
                         let mut written = 0;
                         while written < data.len() {
                             match channel.write(&data[written..]) {
-                                Ok(n) => {
-                                    written += n;
-                                }
+                                Ok(n) => written += n,
                                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    thread::sleep(Duration::from_millis(10));
-                                    continue;
+                                    thread::sleep(Duration::from_millis(10)); // Restored to 10ms for stability
                                 }
                                 Err(e) => {
                                     println!("Worker: 向 SSH channel 写入失败: {:?}", e);
-                                    break;
+                                    break; // breaks out of inner 'while written' loop
                                 }
                             }
                         }
@@ -207,13 +239,9 @@ pub async fn open_ssh_session(
                         println!("Worker: 收到 Resize 请求, cols: {}, rows: {}", cols, rows);
                         loop {
                             match channel.request_pty_size(cols, rows, None, None) {
-                                Ok(_) => {
-                                    println!("Worker: PTY Size 同步成功");
-                                    break;
-                                }
+                                Ok(_) => break,
                                 Err(e) if e.code() == ErrorCode::Session(EAGAIN) => {
-                                    thread::sleep(Duration::from_millis(50));
-                                    continue;
+                                    thread::sleep(Duration::from_millis(20)); // Restored to 20ms
                                 }
                                 Err(e) => {
                                     println!("Worker: PTY Size 同步失败: {}", e);
@@ -225,14 +253,13 @@ pub async fn open_ssh_session(
                     SshControlMsg::Close => {
                         println!("Worker: 收到 Close 请求，正在结束会话...");
                         let _ = channel.close();
-                        break;
+                        break 'worker; // Properly breaks the worker loop
                     }
                 }
             }
 
-            if !active {
-                // To avoid 100% CPU usage
-                thread::sleep(Duration::from_millis(20));
+            if !read_active && !write_active {
+                idle_count += 1;
             }
         }
         println!("Worker: SSH 会话 {} 线程已退出循环结束工作", session_id_clone);
@@ -250,11 +277,12 @@ pub async fn open_ssh_session(
 pub async fn write_to_ssh(
     state: State<'_, SessionPool>,
     session_id: String,
-    data: Vec<u8>,
+    data: String,
 ) -> Result<(), String> {
     let pool = state.0.lock().unwrap();
     if let Some(sess) = pool.get(&session_id) {
-        match sess.tx.send(SshControlMsg::Data(data)) {
+        let bytes = general_purpose::STANDARD.decode(data.as_bytes()).unwrap_or_default();
+        match sess.tx.send(SshControlMsg::Data(bytes)) {
             Ok(_) => {
                 Ok(())
             }

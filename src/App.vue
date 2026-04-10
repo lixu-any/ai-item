@@ -17,8 +17,16 @@ import SessionPlayer from "./components/SessionPlayer.vue";
 import SftpBrowser from "./components/SftpBrowser.vue";
 import HostMonitor from "./components/HostMonitor.vue";
 import HostForm from "./components/HostForm.vue";
-import GroupForm from "./components/GroupForm.vue";
 import HostSidebar from "./components/HostSidebar.vue";
+
+function bytesToBase64App(bytes: Uint8Array) {
+  let binary = '';
+  // Chunking to avoid Call Stack Exceeded
+  for (let i = 0; i < bytes.byteLength; i+=1024) {
+    binary += String.fromCharCode.apply(null, bytes.slice(i, i + 1024) as unknown as number[]);
+  }
+  return window.btoa(binary);
+}
 
 interface SessionTab {
   id: string;
@@ -147,9 +155,9 @@ async function sendBroadcast() {
   for (const s of targets) {
     try {
       if (s.type === 'ssh') {
-        await invoke('write_to_ssh', { sessionId: s.id, data: Array.from(data) });
+        await invoke('write_to_ssh', { sessionId: s.id, data: bytesToBase64App(data) });
       } else {
-        await invoke('write_to_pty', { sessionId: s.id, data: Array.from(data) });
+        await invoke('write_to_pty', { sessionId: s.id, data: bytesToBase64App(data) });
       }
     } catch { /* 静默忽略单个失败 */ }
   }
@@ -344,10 +352,10 @@ async function handleZmodemDetect(session: any, payload?: any) {
     showToast('文件选择失败: ' + err, 'error');
   } finally {
     // Send \r to restore shell prompt
-    invoke('write_to_ssh', { sessionId: session.id, data: [13] }).catch(() => {});
+    invoke('write_to_ssh', { sessionId: session.id, data: "DQ==" }).catch(() => {});
     // Refocus the xterm terminal after native dialog closes (dialog steals focus)
     setTimeout(() => {
-      invoke('write_to_ssh', { sessionId: session.id, data: [13] }).catch(() => {});
+      invoke('write_to_ssh', { sessionId: session.id, data: "DQ==" }).catch(() => {});
       // Focus the xterm canvas element so user can type immediately
       const xtermCanvas = document.querySelector('.xterm-helper-textarea') as HTMLElement;
       xtermCanvas?.focus();
@@ -414,9 +422,9 @@ async function handleZmodemSz(session: any, payload: { sessionId: string; filena
   } catch (err: any) {
     showToast('下载失败: ' + err, 'error');
   } finally {
-    invoke('write_to_ssh', { sessionId: session.id, data: [13] }).catch(() => {});
+    invoke('write_to_ssh', { sessionId: session.id, data: "DQ==" }).catch(() => {});
     setTimeout(() => {
-      invoke('write_to_ssh', { sessionId: session.id, data: [13] }).catch(() => {});
+      invoke('write_to_ssh', { sessionId: session.id, data: "DQ==" }).catch(() => {});
       const xtermCanvas = document.querySelector('.xterm-helper-textarea') as HTMLElement;
       xtermCanvas?.focus();
     }, 300);

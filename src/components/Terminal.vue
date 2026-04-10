@@ -107,6 +107,26 @@ import { writeTextFile } from '@tauri-apps/plugin-fs';
 import ContextMenu, { MenuItem } from './ContextMenu.vue';
 import '@xterm/xterm/css/xterm.css';
 import NanoHUD from './NanoHUD.vue';
+import { CanvasAddon } from '@xterm/addon-canvas';
+
+function base64ToBytes(base64: string) {
+  const binary_string = window.atob(base64);
+  const len = binary_string.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary_string.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = '';
+  // Chunking to avoid Maximum Call Stack Size Exceeded for huge transfers
+  for (let i = 0; i < bytes.byteLength; i+=1024) {
+    binary += String.fromCharCode.apply(null, bytes.slice(i, i + 1024) as unknown as number[]);
+  }
+  return window.btoa(binary);
+}
 
 const recapMessage = ref<string | null>(null);
 
@@ -170,7 +190,7 @@ async function executeHoloSearch() {
       const sessionIdStr = props.sessionId || props.sessionObj.id.toString();
       await invoke(props.type === 'ssh' ? 'write_to_ssh' : 'write_to_pty', {
         sessionId: sessionIdStr,
-        data: Array.from(u8)
+        data: bytesToBase64(u8)
       });
       emit('toast', { message: '✨ 指令已吸附至光标，请按回车键 (Enter) 执行', type: 'success' });
     }
@@ -460,7 +480,6 @@ onMounted(async () => {
     });
   });
 
-  // 仅在明确选择 WebGL 或默认时加载
   if (savedRenderer === 'webgl' || !savedRenderer) {
     try {
       webglAddon = new WebglAddon();
@@ -468,11 +487,13 @@ onMounted(async () => {
         console.warn('Xterm WebGL context lost, disposing addon to fallback to DOM renderer.');
         webglAddon?.dispose();
         webglAddon = null;
+        try { term!.loadAddon(new CanvasAddon()); } catch(e){}
       });
       term.loadAddon(webglAddon);
     } catch (e) {
-      console.warn('WebGL addon failed to load, falling back to DOM renderer', e);
+      console.warn('WebGL addon failed to load, falling back to Canvas renderer', e);
       webglAddon = null;
+      try { term!.loadAddon(new CanvasAddon()); } catch(e){}
     }
   }
   
@@ -724,9 +745,9 @@ async function setupSessionListener(id: string) {
     }
 
     try {
-      unlisten = await listen<number[]>(`sse-data-${id}`, (event) => {
+      unlisten = await listen<string>(`sse-data-${id}`, (event) => {
         if (term) {
-          const u8 = new Uint8Array(event.payload);
+          const u8 = base64ToBytes(event.payload);
           
           // Save cooldown state BEFORE prompt parsing may reset it
           // (used later for filtering - must capture state before any mutation)
@@ -774,17 +795,17 @@ async function setupSessionListener(id: string) {
                   const szFilename = fileMatch ? fileMatch[1].trim() : filenameFromCmd;
                   const szCwd = fileMatch ? fileMatch[2].trim() : lastSeenCwd;
                   
-                  invoke('write_to_ssh', { sessionId: id, data: [24,24,24,24,24,8,8,8,8,8] }).catch(() => {});
+                  invoke('write_to_ssh', { sessionId: id, data: "GBgYGBgICAgICAg=" }).catch(() => {});
                   term?.writeln(`\x1b[1;33m[Nixu]\x1b[0m sz: ${szFilename} (${szCwd})`);
                   emit('zmodem-sz', { sessionId: id, filename: szFilename, cwd: szCwd });
                 }).catch(() => {
-                  invoke('write_to_ssh', { sessionId: id, data: [24,24,24,24,24,8,8,8,8,8] }).catch(() => {});
+                  invoke('write_to_ssh', { sessionId: id, data: "GBgYGBgICAgICAg=" }).catch(() => {});
                   emit('zmodem-sz', { sessionId: id, filename: filenameFromCmd, cwd: lastSeenCwd });
                 });
               } else {
                 // rz: send Ctrl+C immediately and emit right away
                 // Don't wait for sftp_exec - App.vue's resolveCwd will handle the path
-                invoke('write_to_ssh', { sessionId: id, data: [24,24,24,24,24,8,8,8,8,8] }).catch(() => {});
+                invoke('write_to_ssh', { sessionId: id, data: "GBgYGBgICAgICAg=" }).catch(() => {});
                 term?.write('\r\n');
                 term?.writeln(`\x1b[1;33m[Nixu]\x1b[0m 检测到 rz，弹出上传窗口...`);
                 emit('zmodem-detect', { sessionId: id, cwd: lastSeenCwd });
@@ -911,10 +932,11 @@ async function sendDataToBackend(data: string) {
   if (props.sessionId) {
     try {
       const encoder = new TextEncoder();
+      const u8 = encoder.encode(data);
       const command = props.type === 'ssh' ? 'write_to_ssh' : 'write_to_pty';
       await invoke(command, {
         sessionId: props.sessionId,
-        data: Array.from(encoder.encode(data))
+        data: bytesToBase64(u8)
       });
     } catch (err) {}
   }

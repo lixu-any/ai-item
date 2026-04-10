@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use tauri::{AppHandle, Emitter, State};
+use base64::{Engine as _, engine::general_purpose};
 
 pub enum PtyControlMsg {
     Data(Vec<u8>),
@@ -12,7 +13,7 @@ pub enum PtyControlMsg {
 }
 
 pub struct PtySession {
-    pub tx: mpsc::Sender<PtyControlMsg>,
+    pub tx: mpsc::SyncSender<PtyControlMsg>,
 }
 
 #[derive(Default)]
@@ -49,7 +50,7 @@ pub async fn open_pty_session(
     
     let mut child = pty_pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
 
-    let (tx, rx) = mpsc::channel::<PtyControlMsg>();
+    let (tx, rx) = mpsc::sync_channel::<PtyControlMsg>(2048);
 
     // 保存到池中
     {
@@ -69,7 +70,8 @@ pub async fn open_pty_session(
             match reader.read(&mut buffer) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
-                    let _ = app_handle_clone.emit(&format!("sse-data-{}", session_id_for_reader), buffer[..n].to_vec());
+                    let b64_data = general_purpose::STANDARD.encode(&buffer[..n]);
+                    let _ = app_handle_clone.emit(&format!("sse-data-{}", session_id_for_reader), b64_data);
                 }
                 Err(_) => break,
             }
@@ -116,11 +118,12 @@ pub async fn open_pty_session(
 pub async fn write_to_pty(
     state: State<'_, PtySessionPool>,
     session_id: String,
-    data: Vec<u8>,
+    data: String,
 ) -> Result<(), String> {
     let pool = state.0.lock().unwrap();
     if let Some(session) = pool.get(&session_id) {
-        let _ = session.tx.send(PtyControlMsg::Data(data));
+        let bytes = general_purpose::STANDARD.decode(data.as_bytes()).unwrap_or_default();
+        let _ = session.tx.send(PtyControlMsg::Data(bytes));
         Ok(())
     } else {
         Err("Session not found".to_string())
