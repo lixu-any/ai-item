@@ -55,7 +55,7 @@ jobs:
 
       # 安装项目 NPM 依赖
       - name: install app dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       # 核心：使用 Tauri Action 执行真正的 build 打包
       # 它会自动拉取 tauri-cli 并运行 npm run tauri build
