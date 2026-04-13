@@ -66,7 +66,7 @@ jobs:
         with:
           tagName: app-v__VERSION__ # 将当前版本号作为 Tag
           releaseName: 'Nixu v__VERSION__'
-          releaseBody: '详见提交说明'
-          releaseDraft: true     # 生成的 release 会以草稿状态存在，你可以手动检查后再发布
+          releaseBody: '由 GitHub Actions 全自动打包发布'
+          releaseDraft: false    # 直接正式发布，不在后台隐藏为草稿
           prerelease: false
           args: ${{ matrix.args }}
