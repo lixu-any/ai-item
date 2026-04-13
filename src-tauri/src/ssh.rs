@@ -48,6 +48,7 @@ pub async fn open_ssh_session(
         Duration::from_secs(timeout_secs),
     ).map_err(|e| format!("连接超时或失败（{}s）：{}", timeout_secs, e))?;
 
+    let _ = tcp.set_nodelay(true);
     tcp.set_nonblocking(true).map_err(|e| e.to_string())?;
 
     let mut sess = Session::new().map_err(|e| e.to_string())?;
@@ -152,7 +153,7 @@ pub async fn open_ssh_session(
     
     thread::spawn(move || {
         println!("Worker: 开始为 Session {} 启动循环...", session_id_clone);
-        let mut buffer = [0u8; 8192];
+        let mut buffer = [0u8; 65536]; // 升级至 64KB 满帧缓存
         let mut idle_count = 0;
         'worker: loop {
             let mut read_active = false;
@@ -342,6 +343,7 @@ pub async fn get_host_stats(
         std::time::Duration::from_secs(10),
     ).map_err(|e| format!("连接失败: {}", e))?;
 
+    let _ = tcp.set_nodelay(true);
     let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_tcp_stream(tcp);
     sess.set_blocking(true);

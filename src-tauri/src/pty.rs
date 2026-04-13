@@ -65,7 +65,7 @@ pub async fn open_pty_session(
     // 读取 PTY 输出并发送到前端
     let mut reader = pty_pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     thread::spawn(move || {
-        let mut buffer = [0u8; 8192];
+        let mut buffer = [0u8; 65536]; // 升级至 64KB 满帧缓存
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break, // EOF
